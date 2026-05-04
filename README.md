@@ -29,6 +29,15 @@ This project is an implementation of the embedded key-value pair database that l
 - Store sorted key-value entries
 - Optimized for sequential reads
 
+### Concurrency Model
+
+The system supports concurrent operations using Go synchronization primitives:
+
+- Read-heavy workloads are optimized using `sync.RWMutex`
+- Multiple readers can access data concurrently
+- Writes are coordinated to ensure consistency and durability
+- Background compaction operates independently without blocking reads
+
 ### Tradeoffs
 
 -**Write Optimization vs Read Amplification:** Faster writes through append-only design, mitigated by compaction
