@@ -1,6 +1,8 @@
 package memtable
 
-import "sync"
+import (
+	"sync"
+)
 
 type Entry struct {
 	Value   []byte
@@ -45,4 +47,37 @@ func (m *MemTable) Delete(key []byte) {
 	defer m.mu.Unlock()
 
 	m.data[string(key)] = Entry{Deleted: true}
+}
+
+func (m *MemTable) Export() map[string][]byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	out := make(map[string][]byte)
+	for k, entry := range m.data {
+		if !entry.Deleted {
+			out[k] = append([]byte(nil), entry.Value...)
+		}
+	}
+
+	return out
+}
+
+func (m *MemTable) ApproximateSize() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	size := 0
+	for k, entry := range m.data {
+		size += len(k) + len(entry.Value) + 1
+	}
+
+	return size
+}
+
+func (m *MemTable) Clear() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.data = make(map[string]Entry)
 }

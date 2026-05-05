@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	fmt.Println("Starting StrataKV Phase 2b (Crash Recovery)...")
+	fmt.Println("Starting StrataKV Phase 3a (Load Testing & Flushing)...")
 
 	db, err := engine.Open("./data")
 	if err != nil {
@@ -16,17 +16,17 @@ func main() {
 	}
 	defer db.Close()
 
-	// NOTICE: We are NOT calling db.Put() right now.
-	// We are going to try and read the data you saved in the previous run!
+	fmt.Println("Pumping 50,000 records to trigger a flush...")
 
-	val, found := db.Get([]byte("role"))
-	if found {
-		fmt.Printf("CRASH RECOVERY SUCCESS! Found data from last session -> Key: 'role', Value: '%s'\n", string(val))
-	} else {
-		fmt.Println("RECOVERY FAILED! Key not found. The memtable is empty.")
+	// Write enough data to exceed the 1MB threshold
+	for i := 0; i < 50000; i++ {
+		key := []byte(fmt.Sprintf("user_key_%d", i))
+		val := []byte(fmt.Sprintf("some_long_user_payload_data_to_take_up_space_%d", i))
+
+		if err := db.Put(key, val); err != nil {
+			log.Fatalf("Put failed at iteration %d: %v", i, err)
+		}
 	}
 
-	// Let's add a new key just to prove appending still works after recovery
-	// db.Put([]byte("role"), []byte("engineer"))
-	fmt.Println("Appended new key 'status' to the log.")
+	fmt.Println("Load test complete. Check your ./data directory!")
 }

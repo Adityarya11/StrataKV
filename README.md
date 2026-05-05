@@ -9,6 +9,7 @@ This project is an implementation of the embedded key-value pair database that l
 ### Architecture
 
 - if crash happens Wal has the data and memtable rebuilds this. [line49]("/internal/engine/db.go")
+- tradeoffs: "Currently uses stop-the-world flushing; future optimization involves active/immutable MemTable separation."
   < Place Holder >
 
 ### Storage Design
@@ -41,7 +42,7 @@ The system supports concurrent operations using Go synchronization primitives:
 
 ### Tradeoffs
 
--**Write Optimization vs Read Amplification:** Faster writes through append-only design, mitigated by compaction
+**Write Optimization vs Read Amplification:** Faster writes through append-only design, mitigated by compaction
 
 - **Memory Usage:** In-memory index improves read latency at the cost of additional RAM
 - **Compaction Overhead:** Background processing introduces additional complexity
