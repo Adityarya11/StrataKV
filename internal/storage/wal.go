@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/binary"
+	"io"
 	"os"
 	"sync"
 )
@@ -12,14 +13,15 @@ type WAL struct {
 }
 
 // WAL -> write - ahead - log file for the logs (this will be appended)
-func NewWal(path string) (*WAL, error) {
+func NewWAL(path string) (*WAL, error) {
 	/*
 	* // os.O_APPEND: Only write to the end of the file.
 	* // os.O_CREATE: Create it if it doesn't exist.
-	* // os.O_WRONLY: We only need to write during normal operation.
+	* // os.O_WRONLY: We only need to write during normal operation. -> this is blocked by os for the next iteration, hence we
+	* // something os.O_RDWR
 	 */
 
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0544)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return nil, err
 	}
@@ -54,11 +56,16 @@ func (w *WAL) WriteEntry(isDelete bool, key, value []byte) error {
 		return errK
 	}
 
-	if isDelete {
+	if !isDelete {
 		_, errV := w.file.Write(value)
 		if errV != nil {
 			return errV
 		}
+	}
+
+	// Ensure data is written to disk
+	if err := w.file.Sync(); err != nil {
+		return err
 	}
 
 	return nil
@@ -70,4 +77,47 @@ func (w *WAL) Close() error {
 	defer w.mu.Unlock()
 
 	return w.file.Close()
+}
+
+func (w *WAL) Recover(fn func(isDelete bool, key, val []byte)) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+
+	for {
+		header := make([]byte, 9)
+		_, err := io.ReadFull(w.file, header)
+		if err == io.EOF {
+			break // recovery completed
+		}
+		if err != nil {
+			return err
+		}
+
+		isDelete := header[0] == 1
+		keyLen := binary.LittleEndian.Uint32(header[1:5])
+		valLen := binary.LittleEndian.Uint32(header[5:9])
+
+		key := make([]byte, keyLen)
+		if _, err := io.ReadFull(w.file, key); err != nil {
+			return err
+		}
+
+		var value []byte
+		if !isDelete {
+			value = make([]byte, valLen)
+			if _, err := io.ReadFull(w.file, value); err != nil {
+				return err
+			}
+		}
+
+		fn(isDelete, key, value)
+	}
+
+	_, err := w.file.Seek(0, io.SeekEnd)
+
+	return err
 }

@@ -8,7 +8,8 @@ This project is an implementation of the embedded key-value pair database that l
 
 ### Architecture
 
-< Place Holder >
+- if crash happens Wal has the data and memtable rebuilds this. [line49]("/internal/engine/db.go")
+  < Place Holder >
 
 ### Storage Design
 

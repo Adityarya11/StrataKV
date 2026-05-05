@@ -10,23 +10,37 @@ import (
 )
 
 type DB struct {
-	mem *memtable.Memtable
+	mem *memtable.MemTable
 	wal *storage.WAL
 }
 
 func Open(dataDir string) (*DB, error) {
-	err := os.MkdirAll(dataDir, 0755)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create data dir: %w", err)
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create the data dir: %w", err)
 	}
 
 	walPath := filepath.Join(dataDir, "0001.wal")
-	wal, errPath := storage.NewWal(walPath)
-	if errPath != nil {
-		return nil, fmt.Errorf("failed to open WAL: %w", errPath)
+	wal, err := storage.NewWAL(walPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open wal: %w", err)
 	}
+
+	mem := memtable.New()
+
+	err = wal.Recover(func(isDelete bool, key []byte, val []byte) {
+		if isDelete {
+			mem.Delete(key)
+		} else {
+			mem.Put(key, val)
+		}
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to recover from Wal: %w", err)
+	}
+
 	return &DB{
-		mem: memtable.New(),
+		mem: mem,
 		wal: wal,
 	}, nil
 }
