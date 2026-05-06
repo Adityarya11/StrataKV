@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
@@ -8,7 +9,8 @@ import (
 )
 
 type Server struct {
-	db *engine.DB
+	db  *engine.DB
+	srv *http.Server
 }
 
 func NewServer(db *engine.DB) *Server {
@@ -24,8 +26,20 @@ func (s *Server) Start(port string) error {
 
 	mux.HandleFunc("/compact", s.handleCompact)
 
-	return http.ListenAndServe(port, mux)
+	s.srv = &http.Server{
+		Addr:    port,
+		Handler: mux,
+	}
 
+	return s.srv.ListenAndServe()
+}
+
+// Stop gracefully shuts down the HTTP server
+func (s *Server) Stop(ctx context.Context) error {
+	if s.srv != nil {
+		return s.srv.Shutdown(ctx)
+	}
+	return nil
 }
 
 type KVRequest struct {

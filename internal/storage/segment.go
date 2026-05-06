@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/Adityarya11/StrataKV/internal/memtable"
 )
 
 type Segment struct {
@@ -12,9 +14,8 @@ type Segment struct {
 }
 
 // WriteSegment takes the in-memory data and stores it in the dense segment file format.
-func WriteSegment(path string, data map[string][]byte) error {
-	// O_trunc is used for the fresh start in the file if it exists
-
+func WriteSegment(path string, data map[string]memtable.Entry) error {
+	// os.O_TRUNC is used to rewrite the file completely if it already exists.
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to create segment: %w", err)
@@ -24,9 +25,16 @@ func WriteSegment(path string, data map[string][]byte) error {
 	for k, v := range data {
 		keyBytes := []byte(k)
 
-		header := make([]byte, 8) // here 4 -> key len & 4-> val len
-		binary.LittleEndian.PutUint32(header[0:4], uint32(len(keyBytes)))
-		binary.LittleEndian.PutUint32(header[4:8], uint32(len(v)))
+		header := make([]byte, 9) // 1 -> tombstone, 4 -> key len, 4-> val len
+
+		if v.Deleted {
+			header[0] = 1
+		} else {
+			header[0] = 0
+		}
+
+		binary.LittleEndian.PutUint32(header[1:5], uint32(len(keyBytes)))
+		binary.LittleEndian.PutUint32(header[5:9], uint32(len(v.Value)))
 
 		if _, err := f.Write(header); err != nil {
 			return err
@@ -34,8 +42,10 @@ func WriteSegment(path string, data map[string][]byte) error {
 		if _, err := f.Write(keyBytes); err != nil {
 			return err
 		}
-		if _, err := f.Write(v); err != nil {
-			return err
+		if !v.Deleted {
+			if _, err := f.Write(v.Value); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -43,7 +53,7 @@ func WriteSegment(path string, data map[string][]byte) error {
 }
 
 // ReadSegment
-func ReadSegment(path string, out map[string][]byte) error {
+func ReadSegment(path string, out map[string]memtable.Entry) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("failed to open the segment: %w", err)
@@ -52,7 +62,7 @@ func ReadSegment(path string, out map[string][]byte) error {
 	defer f.Close()
 
 	for {
-		header := make([]byte, 8)
+		header := make([]byte, 9)
 
 		_, err := io.ReadFull(f, header)
 		if err == io.EOF {
@@ -62,64 +72,75 @@ func ReadSegment(path string, out map[string][]byte) error {
 			return nil
 		}
 
-		keyLen := binary.LittleEndian.Uint32(header[0:4])
-		valLen := binary.LittleEndian.Uint32(header[4:8])
+		isDeleted := header[0] == 1
+		keyLen := binary.LittleEndian.Uint32(header[1:5])
+		valLen := binary.LittleEndian.Uint32(header[5:9])
 
 		key := make([]byte, keyLen)
 		if _, err := io.ReadFull(f, key); err != nil {
 			return nil
 		}
 
-		value := make([]byte, valLen)
-		if _, err := io.ReadFull(f, value); err != nil {
-			return err
+		var value []byte
+		if !isDeleted {
+			value = make([]byte, valLen)
+			if _, err := io.ReadFull(f, value); err != nil {
+				return err
+			}
 		}
-		out[string(key)] = value
+		out[string(key)] = memtable.Entry{Value: value, Deleted: isDeleted}
 	}
 
 	return nil
 }
 
-func SearchSegment(path string, searchKey []byte) ([]byte, bool) {
+func SearchSegment(path string, searchKey []byte) ([]byte, bool, bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, false
+		return nil, false, false
 	}
 
 	defer f.Close()
 
 	for {
-		header := make([]byte, 8)
+		header := make([]byte, 9)
 		_, err := io.ReadFull(f, header)
 		if err == io.EOF {
 			break
 		}
 
 		if err != nil {
-			return nil, false
+			return nil, false, false
 		}
 
-		keyLen := binary.LittleEndian.Uint32(header[0:4])
-		valLen := binary.LittleEndian.Uint32(header[4:8])
+		isDeleted := header[0] == 1
+		keyLen := binary.LittleEndian.Uint32(header[1:5])
+		valLen := binary.LittleEndian.Uint32(header[5:9])
 
 		key := make([]byte, keyLen)
 		if _, err := io.ReadFull(f, key); err != nil {
-			return nil, false
+			return nil, false, false
 		}
 
 		if string(key) == string(searchKey) {
-			value := make([]byte, valLen)
-			if _, err := io.ReadFull(f, value); err != nil {
-				return nil, false
+			if isDeleted {
+				return nil, true, true // Found, but it's a tombstone
 			}
 
-			return value, true
+			value := make([]byte, valLen)
+			if _, err := io.ReadFull(f, value); err != nil {
+				return nil, false, false
+			}
+
+			return value, true, false // Found and not deleted
 		}
 
-		if _, err := f.Seek(int64(valLen), io.SeekCurrent); err != nil {
-			return nil, false
+		if !isDeleted {
+			if _, err := f.Seek(int64(valLen), io.SeekCurrent); err != nil {
+				return nil, false, false
+			}
 		}
 	}
 
-	return nil, false
+	return nil, false, false
 }

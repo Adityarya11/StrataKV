@@ -141,7 +141,10 @@ func (db *DB) Get(key []byte) ([]byte, bool) {
 	for _, seg := range segments {
 		segPath := filepath.Join(db.dataDir, seg)
 
-		if val, found := storage.SearchSegment(segPath, key); found {
+		if val, found, isDeleted := storage.SearchSegment(segPath, key); found {
+			if isDeleted {
+				return nil, false // The key was explicitly deleted (tombstone)
+			}
 			return val, true
 		}
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Adityarya11/StrataKV/internal/memtable"
 	"github.com/Adityarya11/StrataKV/internal/storage"
 )
 
@@ -36,7 +37,7 @@ func (db *DB) Compact() error {
 	sort.Strings(segments)
 
 	// Merging into memory, older segments first to ensure newer values overwrite older ones.
-	mergedData := make(map[string][]byte)
+	mergedData := make(map[string]memtable.Entry)
 	for _, seg := range segments {
 		segPath := filepath.Join(db.dataDir, seg)
 		if err := storage.ReadSegment(segPath, mergedData); err != nil {
@@ -44,10 +45,18 @@ func (db *DB) Compact() error {
 		}
 	}
 
+	// Purge all tombstones: older segments are being deleted, so we can finally drop them!
+	finalData := make(map[string]memtable.Entry)
+	for k, v := range mergedData {
+		if !v.Deleted {
+			finalData[k] = v
+		}
+	}
+
 	newSegName := fmt.Sprintf("%d.seg", time.Now().UnixNano())
 	newSegPath := filepath.Join(db.dataDir, newSegName)
 
-	if err := storage.WriteSegment(newSegPath, mergedData); err != nil {
+	if err := storage.WriteSegment(newSegPath, finalData); err != nil {
 		return fmt.Errorf("failed to write compacted segment: %w", err)
 	}
 

@@ -50,18 +50,16 @@ func (m *MemTable) Delete(key []byte) {
 }
 
 // Export returns the contents of the memtable for flushing to disk.
-// TODO (ISSUE-4): Currently, Export skips deleted entries (tombstones). 
-// This causes deletes to be lost after a flush. In a proper LSM Tree, 
-// tombstones must be persisted to segments to override older values on disk.
-func (m *MemTable) Export() map[string][]byte {
+// Tombstones (deleted entries) are explicitly included so they persist
+// to segments and correctly override older values on disk.
+func (m *MemTable) Export() map[string]Entry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	out := make(map[string][]byte)
+	out := make(map[string]Entry)
 	for k, entry := range m.data {
-		if !entry.Deleted {
-			out[k] = append([]byte(nil), entry.Value...)
-		}
+		copyVal := append([]byte(nil), entry.Value...)
+		out[k] = Entry{Value: copyVal, Deleted: entry.Deleted}
 	}
 
 	return out
