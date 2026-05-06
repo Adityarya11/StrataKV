@@ -78,7 +78,7 @@ func (db *DB) Put(key, val []byte) error {
 }
 
 func (db *DB) flushLocked() error {
-	fmt.Println("Memtable is full, Starting flush ----> ")
+	fmt.Println("Memtable is full, starting flush process...")
 
 	data := db.mem.Export()
 	if len(data) == 0 {
@@ -113,8 +113,8 @@ func (db *DB) flushLocked() error {
 }
 
 func (db *DB) Get(key []byte) ([]byte, bool) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
+	db.mu.RLock()
+	defer db.mu.RUnlock()
 
 	val, found := db.mem.Get(key) // check the memtable -> fastest
 	if found {

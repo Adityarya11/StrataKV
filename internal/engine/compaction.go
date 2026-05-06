@@ -31,16 +31,16 @@ func (db *DB) Compact() error {
 		return nil
 	}
 
-	fmt.Printf("Compaction started, Merging %d segments -----> ", len(segments))
+	fmt.Printf("Compaction started, merging %d segments...\n", len(segments))
 
 	sort.Strings(segments)
 
-	// merging into memory, old segments first then the newer ones.
+	// Merging into memory, older segments first to ensure newer values overwrite older ones.
 	mergedData := make(map[string][]byte)
 	for _, seg := range segments {
 		segPath := filepath.Join(db.dataDir, seg)
-		if err := storage.Readsgment(segPath, mergedData); err != nil {
-			return fmt.Errorf("Failed to read the segment: %w", err)
+		if err := storage.ReadSegment(segPath, mergedData); err != nil {
+			return fmt.Errorf("failed to read segment %s: %w", seg, err)
 		}
 	}
 
@@ -48,7 +48,7 @@ func (db *DB) Compact() error {
 	newSegPath := filepath.Join(db.dataDir, newSegName)
 
 	if err := storage.WriteSegment(newSegPath, mergedData); err != nil {
-		return fmt.Errorf("Failed to write compacted segment:  %w", err)
+		return fmt.Errorf("failed to write compacted segment: %w", err)
 	}
 
 	for _, seg := range segments {

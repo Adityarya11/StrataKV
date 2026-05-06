@@ -11,13 +11,13 @@ type Segment struct {
 	file *os.File
 }
 
-// Write Segment takes the in memory data and stores in the dense segmet file.
+// WriteSegment takes the in-memory data and stores it in the dense segment file format.
 func WriteSegment(path string, data map[string][]byte) error {
 	// O_trunc is used for the fresh start in the file if it exists
 
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
-		return fmt.Errorf("failed to create Segment: %w", err)
+		return fmt.Errorf("failed to create segment: %w", err)
 	}
 	defer f.Close()
 
@@ -42,8 +42,8 @@ func WriteSegment(path string, data map[string][]byte) error {
 	return f.Sync()
 }
 
-// Readsgment
-func Readsgment(path string, out map[string][]byte) error {
+// ReadSegment
+func ReadSegment(path string, out map[string][]byte) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("failed to open the segment: %w", err)
@@ -71,7 +71,7 @@ func Readsgment(path string, out map[string][]byte) error {
 		}
 
 		value := make([]byte, valLen)
-		if _, err := io.ReadFull(f, key); err != nil {
+		if _, err := io.ReadFull(f, value); err != nil {
 			return err
 		}
 		out[string(key)] = value

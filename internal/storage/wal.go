@@ -29,7 +29,7 @@ func NewWAL(path string) (*WAL, error) {
 	return &WAL{file: f}, nil
 }
 
-// WriteEntry for entring the file
+// WriteEntry adds a new operation log to the WAL.
 func (w *WAL) WriteEntry(isDelete bool, key, value []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
