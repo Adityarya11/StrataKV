@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	fmt.Println("Starting StrataKV Phase 3a (Load Testing & Flushing)...")
+	fmt.Println("🚀 Starting StrataKV Phase 3b (Background Compaction)...")
 
 	db, err := engine.Open("./data")
 	if err != nil {
@@ -16,17 +16,25 @@ func main() {
 	}
 	defer db.Close()
 
-	fmt.Println("Pumping 50,000 records to trigger a flush...")
+	fmt.Println("🔨 Writing lots of duplicate data to simulate updates...")
 
-	// Write enough data to exceed the 1MB threshold
+	// We are writing to the SAME 10 keys 5000 times each.
+	// Without compaction, disk space blows up. With compaction, it shrinks instantly.
 	for i := 0; i < 50000; i++ {
-		key := []byte(fmt.Sprintf("user_key_%d", i))
-		val := []byte(fmt.Sprintf("some_long_user_payload_data_to_take_up_space_%d", i))
+		key := []byte(fmt.Sprintf("user_key_%d", i%10)) // Only 10 unique keys!
+		val := []byte(fmt.Sprintf("some_long_user_payload_data_to_take_up_space_iteration_%d", i))
 
 		if err := db.Put(key, val); err != nil {
 			log.Fatalf("Put failed at iteration %d: %v", i, err)
 		}
 	}
 
-	fmt.Println("Load test complete. Check your ./data directory!")
+	fmt.Println("💾 Load complete. Now triggering forced compaction...")
+
+	// Force the compaction process
+	if err := db.Compact(); err != nil {
+		log.Fatalf("Compaction failed: %v", err)
+	}
+
+	fmt.Println("✅ Run complete. Look at your ./data directory!")
 }
