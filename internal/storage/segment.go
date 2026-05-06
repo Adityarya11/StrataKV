@@ -79,3 +79,47 @@ func Readsgment(path string, out map[string][]byte) error {
 
 	return nil
 }
+
+func SearchSegment(path string, searchKey []byte) ([]byte, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+
+	defer f.Close()
+
+	for {
+		header := make([]byte, 8)
+		_, err := io.ReadFull(f, header)
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			return nil, false
+		}
+
+		keyLen := binary.LittleEndian.Uint32(header[0:4])
+		valLen := binary.LittleEndian.Uint32(header[4:8])
+
+		key := make([]byte, keyLen)
+		if _, err := io.ReadFull(f, key); err != nil {
+			return nil, false
+		}
+
+		if string(key) == string(searchKey) {
+			value := make([]byte, valLen)
+			if _, err := io.ReadFull(f, value); err != nil {
+				return nil, false
+			}
+
+			return value, true
+		}
+
+		if _, err := f.Seek(int64(valLen), io.SeekCurrent); err != nil {
+			return nil, false
+		}
+	}
+
+	return nil, false
+}

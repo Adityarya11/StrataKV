@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -112,7 +113,42 @@ func (db *DB) flushLocked() error {
 }
 
 func (db *DB) Get(key []byte) ([]byte, bool) {
-	return db.mem.Get(key)
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	val, found := db.mem.Get(key) // check the memtable -> fastest
+	if found {
+		return val, true
+	}
+
+	files, err := os.ReadDir(db.dataDir)
+	if err != nil {
+		return nil, false
+	}
+
+	var segments []string
+	for _, f := range files {
+		if len(f.Name()) > 4 && f.Name()[len(f.Name())-4:] == ".seg" {
+			segments = append(segments, f.Name())
+		}
+	}
+
+	// sort desc
+	sort.Slice(segments, func(i, j int) bool {
+		return segments[i] > segments[j]
+	})
+
+	for _, seg := range segments {
+		segPath := filepath.Join(db.dataDir, seg)
+
+		if val, found := storage.SearchSegment(segPath, key); found {
+			return val, true
+		}
+
+	}
+
+	return nil, false
+
 }
 
 func (db *DB) Delete(key []byte) error {

@@ -3,12 +3,14 @@ package main
 import (
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/Adityarya11/StrataKV/internal/engine"
 )
 
 func main() {
-	fmt.Println("🚀 Starting StrataKV Phase 3b (Background Compaction)...")
+	start := time.Now()
+	fmt.Println("🚀 Starting StrataKV Phase 3c (The Complete Read Path)...")
 
 	db, err := engine.Open("./data")
 	if err != nil {
@@ -16,25 +18,28 @@ func main() {
 	}
 	defer db.Close()
 
-	fmt.Println("🔨 Writing lots of duplicate data to simulate updates...")
+	// 1. Write a specific key we want to track
+	targetKey := []byte("secret_agent")
+	db.Put(targetKey, []byte("007"))
+	fmt.Println("💾 Wrote 'secret_agent' to MemTable.")
 
-	// We are writing to the SAME 10 keys 5000 times each.
-	// Without compaction, disk space blows up. With compaction, it shrinks instantly.
-	for i := 0; i < 50000; i++ {
-		key := []byte(fmt.Sprintf("user_key_%d", i%10)) // Only 10 unique keys!
-		val := []byte(fmt.Sprintf("some_long_user_payload_data_to_take_up_space_iteration_%d", i))
-
-		if err := db.Put(key, val); err != nil {
-			log.Fatalf("Put failed at iteration %d: %v", i, err)
-		}
+	// 2. Flood the database to force a flush to disk
+	fmt.Println("🌊 Flooding database to trigger a flush...")
+	for i := 0; i < 30000; i++ {
+		key := []byte(fmt.Sprintf("junk_key_%d", i))
+		db.Put(key, []byte("junk_data_to_fill_memory"))
 	}
 
-	fmt.Println("💾 Load complete. Now triggering forced compaction...")
+	// 3. At this point, the MemTable was cleared, and 'secret_agent' is trapped in a .seg file.
+	// Let's see if Get() can find it!
+	fmt.Println("🔍 Searching for 'secret_agent'...")
+	val, found := db.Get(targetKey)
 
-	// Force the compaction process
-	if err := db.Compact(); err != nil {
-		log.Fatalf("Compaction failed: %v", err)
+	if found {
+		fmt.Printf("✅ SUCCESS! Found key on disk -> Value: '%s'\n", string(val))
+	} else {
+		fmt.Println("❌ FAILURE! Key was lost after the flush.")
 	}
 
-	fmt.Println("✅ Run complete. Look at your ./data directory!")
+	fmt.Printf("⏱️ Total time taken: %v\n", time.Since(start))
 }
