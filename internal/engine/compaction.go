@@ -60,8 +60,14 @@ func (db *DB) Compact() error {
 		return fmt.Errorf("failed to write compacted segment: %w", err)
 	}
 
+	// compact bf
+	if bf, err := storage.BuildBloomFilter(newSegPath); err == nil {
+		db.segmentFilters[newSegName] = bf
+	}
+
 	for _, seg := range segments {
 		os.Remove(filepath.Join(db.dataDir, seg))
+		delete(db.segmentFilters, seg)
 	}
 
 	fmt.Printf("Compaction completed ====> Success..")

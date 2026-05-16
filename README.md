@@ -94,6 +94,25 @@ Storage Engine
 
 ---
 
+# Known Limitations
+
+The current implementation intentionally prioritizes architectural clarity over production-scale optimization.
+
+Current limitations include:
+
+- linear segment scans during reads
+- no sparse indexes
+- stop-the-world compaction
+- full in-memory segment merges during compaction
+- no checksums or corruption detection
+- no replication or distributed coordination
+- no transactional isolation guarantees
+- synchronous WAL flush on every write
+
+These tradeoffs are documented intentionally as part of the learning-oriented architecture.
+
+---
+
 # Core Storage Engine Components
 
 ## Write-Ahead Log (WAL)
@@ -358,207 +377,6 @@ This ensures:
 
 ---
 
-# Performance Evaluation
-
-StrataKV was evaluated using a synthetic append-heavy workload designed to stress the core architectural characteristics of an LSM-inspired storage engine. ![performance](/imgs/image.png)
-
-The benchmark focused on validating:
-
-- append-only storage behavior
-- stale data accumulation
-- tombstone handling
-- segment growth
-- compaction effectiveness
-- read amplification
-- WAL-based crash recovery
-
-The workload intentionally generated high overwrite density and fragmented segment layouts in order to observe how the storage engine behaves under sustained append-oriented pressure.
-
----
-
-## Benchmark Environment
-
-| Component        | Details                              |
-| ---------------- | ------------------------------------ |
-| Operating System | Windows 11                           |
-| Filesystem       | NTFS                                 |
-| Language         | Go                                   |
-| Storage Model    | Append-Only WAL + Immutable Segments |
-| Benchmark Type   | Local Synthetic Workload             |
-
----
-
-## Workload Characteristics
-
-The benchmark suite generated:
-
-- 50,000 initial key insertions
-- 200,000 repeated overwrites
-- 80,000 tombstone-based deletes
-- 8KB average payload size
-
-The workload intentionally concentrated repeated writes on overlapping key ranges to simulate:
-
-- stale historical entries
-- append-only storage growth
-- fragmented segment accumulation
-- tombstone pressure
-
-This produced a large number of immutable segment files and significant read amplification prior to compaction.
-
----
-
-## Benchmark Results
-
-| Metric                                  | Result     |
-| --------------------------------------- | ---------- |
-| Total Workload Execution Time           | 6m 10s     |
-| Pre-Compaction Disk Usage               | 1954.08 MB |
-| Post-Compaction Disk Usage              | 393.71 MB  |
-| Storage Reclaimed                       | 79.85%     |
-| Segment Reduction                       | 1945 → 2   |
-| Average GET Latency (Before Compaction) | 1.35s      |
-| Average GET Latency (After Compaction)  | 152ms      |
-| WAL Recovery Startup Time               | 632ms      |
-| Compaction Duration                     | 8.33s      |
-
----
-
-## Architectural Observations
-
-### Read Amplification Under Append-Only Growth
-
-The append-heavy workload generated nearly 2,000 immutable segment files prior to compaction.
-
-Because the current read path performs:
-
-- newest-to-oldest segment traversal
-- sequential binary scanning
-- no sparse indexing
-- no Bloom filter optimization
-
-read latency degraded significantly as segment count increased.
-
-Observed average GET latency before compaction:
-
-```text id="jlwm88"
-~1.35 seconds
-```
-
-This demonstrates a classic LSM-tree tradeoff:
-
-> append-only writes improve write simplicity while increasing long-term read amplification.
-
----
-
-### Impact of Compaction
-
-Compaction merged:
-
-```text id="jlwm89"
-1945 segment files → 2 segment files
-```
-
-while reclaiming:
-
-```text id="jlwm90"
-~80% of disk usage
-```
-
-The reduction in stale historical entries and fragmented segments improved average GET latency from:
-
-```text id="jlwm91"
-1.35s → 152ms
-```
-
-This validates the role of compaction in:
-
-- reducing read amplification
-- reclaiming obsolete storage
-- consolidating fragmented append-only state
-
----
-
-### WAL Durability Tradeoff
-
-Each write operation is synchronously persisted through the WAL before memory mutation.
-
-The durability flow follows:
-
-```text id="jlwm92"
-append → fsync() → MemTable update
-```
-
-This guarantees replayable crash consistency but introduces substantial synchronous I/O overhead.
-
-The workload generation phase exhibited high write latency, particularly under Windows NTFS, where repeated synchronous disk flushes significantly reduced throughput.
-
-Potential contributing factors include:
-
-- NTFS metadata journaling
-- synchronous flush barriers
-- filesystem synchronization overhead
-- real-time file interception by Windows Defender
-
-This reflects a fundamental durability-throughput tradeoff commonly encountered in log-structured storage systems.
-
----
-
-### Recovery Performance
-
-Despite the large append-heavy workload, WAL replay successfully reconstructed MemTable state in:
-
-```text id="jlwm93"
-~632ms
-```
-
-This validates:
-
-- replay-based crash recovery
-- append-only durability correctness
-- startup reconstruction flow
-
----
-
-## Benchmark Limitations
-
-The benchmark intentionally prioritizes architectural observability rather than production-scale realism.
-
-Current limitations include:
-
-- synthetic workload generation
-- uniform access distribution
-- lack of Zipfian hot-key modeling
-- no sparse segment indexes
-- no Bloom filters
-- stop-the-world compaction
-- linear segment scans
-- single-node execution only
-
-The benchmark should therefore be interpreted as:
-
-```text id="jlwm94"
-storage-engine architectural validation
-```
-
-rather than competitive database performance analysis.
-
----
-
-## Benchmarking Conclusion
-
-The benchmark successfully demonstrated the fundamental tradeoffs of append-only LSM-inspired storage systems:
-
-- append-only growth simplifies writes but increases read amplification
-- immutable segment accumulation degrades read latency over time
-- tombstones and stale historical entries inflate storage usage
-- compaction reclaims obsolete state and reduces segment fragmentation
-- synchronous WAL durability introduces measurable write overhead
-
-The resulting behavior aligns closely with the core architectural challenges addressed by modern log-structured storage engines such as LevelDB and RocksDB.
-
----
-
 # Storage Tradeoffs
 
 ## Write Optimization vs Read Amplification
@@ -602,31 +420,10 @@ This overhead is particularly noticeable on Windows NTFS systems.
 
 ---
 
-# Known Limitations
-
-The current implementation intentionally prioritizes architectural clarity over production-scale optimization.
-
-Current limitations include:
-
-- linear segment scans during reads
-- no sparse indexes
-- no Bloom filters
-- stop-the-world compaction
-- full in-memory segment merges during compaction
-- no checksums or corruption detection
-- no replication or distributed coordination
-- no transactional isolation guarantees
-- synchronous WAL flush on every write
-
-These tradeoffs are documented intentionally as part of the learning-oriented architecture.
-
----
-
 # Future Enhancements
 
 Potential future improvements include:
 
-- Bloom filter integration
 - sparse segment indexing
 - batched WAL synchronization
 - immutable MemTable flushing

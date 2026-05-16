@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Adityarya11/StrataKV/internal/filter"
 	"github.com/Adityarya11/StrataKV/internal/memtable"
 	"github.com/Adityarya11/StrataKV/internal/storage"
 )
@@ -19,10 +20,11 @@ const (
 )
 
 type DB struct {
-	mu      sync.RWMutex
-	mem     *memtable.MemTable
-	wal     *storage.WAL
-	dataDir string
+	mu             sync.RWMutex
+	mem            *memtable.MemTable
+	wal            *storage.WAL
+	dataDir        string
+	segmentFilters map[string]*filter.BloomFilter
 }
 
 func Open(dataDir string) (*DB, error) {
@@ -50,11 +52,27 @@ func Open(dataDir string) (*DB, error) {
 		return nil, fmt.Errorf("failed to recover from Wal: %w", err)
 	}
 
-	return &DB{
-		mem:     mem,
-		wal:     wal,
-		dataDir: dataDir,
-	}, nil
+	db := &DB{
+		mem:            mem,
+		wal:            wal,
+		dataDir:        dataDir,
+		segmentFilters: make(map[string]*filter.BloomFilter),
+	}
+
+	// bloom filter for all segmensts
+	files, _ := os.ReadDir(dataDir)
+	for _, f := range files {
+		if len(f.Name()) > 4 && f.Name()[len(f.Name())-4:] == ".seg" {
+			segPath := filepath.Join(dataDir, f.Name())
+
+			bf, err := storage.BuildBloomFilter(segPath)
+			if err == nil {
+				db.segmentFilters[f.Name()] = bf
+			}
+		}
+	}
+
+	return db, nil
 }
 
 func (db *DB) Put(key, val []byte) error {
@@ -89,6 +107,11 @@ func (db *DB) flushLocked() error {
 	segPath := filepath.Join(db.dataDir, segName)
 	if err := storage.WriteSegment(segPath, data); err != nil {
 		return fmt.Errorf("failed to write segment %s: %w", segName, err)
+	}
+
+	// bf for new segments
+	if bf, err := storage.BuildBloomFilter(segPath); err == nil {
+		db.segmentFilters[segName] = bf
 	}
 
 	db.mem.Clear()
@@ -139,6 +162,13 @@ func (db *DB) Get(key []byte) ([]byte, bool) {
 	})
 
 	for _, seg := range segments {
+
+		// bloom check
+		bf, exists := db.segmentFilters[seg]
+		if exists && !bf.MightContain(key) {
+			continue
+		}
+
 		segPath := filepath.Join(db.dataDir, seg)
 
 		if val, found, isDeleted := storage.SearchSegment(segPath, key); found {

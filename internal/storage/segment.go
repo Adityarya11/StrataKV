@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/Adityarya11/StrataKV/internal/filter"
 	"github.com/Adityarya11/StrataKV/internal/memtable"
 )
 
@@ -143,4 +144,49 @@ func SearchSegment(path string, searchKey []byte) ([]byte, bool, bool) {
 	}
 
 	return nil, false, false
+}
+
+// bloom filter build
+func BuildBloomFilter(path string) (*filter.BloomFilter, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+
+	defer f.Close()
+
+	// 10k bits, 3 hashes
+	bf := filter.New(10000, 3)
+
+	for {
+		header := make([]byte, 9) // same 1 for 'tombstone', 4 for 'key', 4 for 'value'
+
+		_, err := io.ReadFull(f, header)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		isDeleted := header[0] == 1
+		keyLen := binary.LittleEndian.Uint32(header[1:5])
+		valLen := binary.LittleEndian.Uint32(header[5:9])
+
+		key := make([]byte, keyLen)
+		if _, err := io.ReadFull(f, key); err != nil {
+			return nil, err
+		}
+
+		bf.Add(key)
+
+		if !isDeleted && valLen > 0 {
+			if _, err := f.Seek(int64(valLen), io.SeekCurrent); err != nil {
+				return nil, err
+			}
+		}
+
+	}
+
+	return bf, nil
 }

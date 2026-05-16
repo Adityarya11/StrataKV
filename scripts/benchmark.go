@@ -41,6 +41,8 @@ const (
 )
 
 func main() {
+	suiteStart := time.Now()
+
 	fmt.Println("======================================")
 	fmt.Println("StrataKV Benchmark Suite")
 	fmt.Println("======================================")
@@ -132,11 +134,14 @@ func main() {
 
 	fmt.Printf("Segment/WAL File Count: %d\n", filesBefore)
 
+	// --- 🚀 NEW BLOOM FILTER BENCHMARKS HERE ---
+	fmt.Println("\n[Read Benchmarks Before Compaction]")
 	avgReadBefore := benchmarkReads(db)
+	fmt.Printf("Average GET Latency (Existing Keys): %v\n", avgReadBefore)
 
-	fmt.Printf("Average GET Latency Before Compaction: %v\n",
-		avgReadBefore,
-	)
+	avgMissingReadBefore := benchmarkMissingReads(db)
+	fmt.Printf("Average GET Latency (Missing Keys):  %v  <-- Watch this drop with Bloom Filters!\n", avgMissingReadBefore)
+	// -------------------------------------------
 
 	fmt.Println("\n======================================")
 	fmt.Println("[5] Running Compaction")
@@ -167,11 +172,14 @@ func main() {
 
 	fmt.Printf("Storage Reclaimed: %.2f%%\n", reclaimed)
 
+	// --- 🚀 NEW BLOOM FILTER BENCHMARKS POST-COMPACTION ---
+	fmt.Println("\n[Read Benchmarks After Compaction]")
 	avgReadAfter := benchmarkReads(db)
+	fmt.Printf("Average GET Latency (Existing Keys): %v\n", avgReadAfter)
 
-	fmt.Printf("Average GET Latency After Compaction: %v\n",
-		avgReadAfter,
-	)
+	avgMissingReadAfter := benchmarkMissingReads(db)
+	fmt.Printf("Average GET Latency (Missing Keys):  %v\n", avgMissingReadAfter)
+	// ------------------------------------------------------
 
 	fmt.Println("\n======================================")
 	fmt.Println("[6] Testing Crash Recovery")
@@ -193,6 +201,7 @@ func main() {
 
 	fmt.Println("\n======================================")
 	fmt.Println("Benchmark Complete")
+	fmt.Printf("Total suite execution time: %v\n", time.Since(suiteStart))
 	fmt.Println("======================================")
 }
 
@@ -208,6 +217,7 @@ func randomPayload(size int) []byte {
 	return payload
 }
 
+// benchmarkReads tests keys that we KNOW exist in the database.
 func benchmarkReads(db *engine.DB) time.Duration {
 	start := time.Now()
 
@@ -215,6 +225,21 @@ func benchmarkReads(db *engine.DB) time.Duration {
 		keyID := rand.Intn(initialWrites)
 
 		key := "user:" + strconv.Itoa(keyID)
+
+		_, _ = db.Get([]byte(key))
+	}
+
+	return time.Since(start) / readTests
+}
+
+// 🚀 benchmarkMissingReads tests keys that we KNOW DO NOT exist.
+// Without Bloom filters, this causes worst-case linear scanning across all segments.
+func benchmarkMissingReads(db *engine.DB) time.Duration {
+	start := time.Now()
+
+	for i := 0; i < readTests; i++ {
+		// Keys formulated like "missing:99999" are guaranteed not to be in the initial dataset
+		key := "missing_user:" + strconv.Itoa(i)
 
 		_, _ = db.Get([]byte(key))
 	}
