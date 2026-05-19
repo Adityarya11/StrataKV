@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Adityarya11/StrataKV/internal/engine"
+	"github.com/Adityarya11/StrataKV/engine"
 	"github.com/Adityarya11/StrataKV/internal/server"
 )
 

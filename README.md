@@ -94,6 +94,67 @@ Storage Engine
 
 ---
 
+# Public API and Encapsulation Boundary
+
+StrataKV is reusable as a Go module with a strict encapsulation boundary.
+You can embed the storage engine in your own backend, or run the HTTP server as an adapter.
+
+## Public Surface (github.com/Adityarya11/StrataKV/engine)
+
+When you use StrataKV as a dependency:
+
+```bash
+go get github.com/Adityarya11/StrataKV
+```
+
+Your code imports the `engine` package and only sees the stable API:
+
+- `engine.Open()`
+- `db.Put()`
+- `db.Get()`
+- `db.Delete()`
+- `db.Close()`
+
+Example embedding:
+
+```go
+import "github.com/Adityarya11/StrataKV/engine"
+
+db, err := engine.Open("./data")
+if err != nil {
+   // handle error
+}
+defer db.Close()
+
+_ = db.Put([]byte("user:1"), []byte("aditya"))
+val, found := db.Get([]byte("user:1"))
+_ = db.Delete([]byte("user:1"))
+_ = val
+_ = found
+```
+
+## Protected Core (internal/)
+
+All storage internals are placed under `internal/`.
+Go enforces that external modules cannot import anything from this directory.
+This prevents accidental access to:
+
+- WAL rotation and recovery internals
+- MemTable and flush triggers
+- Bloom filter logic
+- segment file layout and compaction
+
+By doing this, StrataKV establishes a strict encapsulation boundary between its public API
+and its storage engine core.
+
+## HTTP Server Adapter
+
+The HTTP server is an adapter that wires the engine to REST endpoints.
+It lives in `cmd/stratakv` and `internal/server`, and is optional when embedding the engine
+directly in your own application.
+
+---
+
 # Known Limitations
 
 The current implementation intentionally prioritizes architectural clarity over production-scale optimization.
@@ -310,6 +371,8 @@ No external frameworks are used.
 ---
 
 # API Endpoints
+
+Minimal route examples and demo bodies are in [test.md](test.md).
 
 ## Insert / Update
 

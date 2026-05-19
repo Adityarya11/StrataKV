@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/Adityarya11/StrataKV/internal/engine"
+	"github.com/Adityarya11/StrataKV/engine"
 )
 
 type Server struct {

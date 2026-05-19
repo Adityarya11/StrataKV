@@ -18,7 +18,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Adityarya11/StrataKV/internal/engine"
+	"github.com/Adityarya11/StrataKV/engine"
 )
 
 const (
