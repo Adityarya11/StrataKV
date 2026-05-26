@@ -24,6 +24,12 @@ The system exposes a lightweight HTTP API using Go’s standard `net/http` packa
 
 ---
 
+# Usage
+
+For setup, run commands, and example requests, see [**Usage.md**](Usage.md).
+
+---
+
 # Motivation
 
 This project was built to explore storage-engine internals from first principles rather than relying solely on external databases as black-box abstractions.
@@ -98,40 +104,6 @@ Storage Engine
 
 StrataKV is reusable as a Go module with a strict encapsulation boundary.
 You can embed the storage engine in your own backend, or run the HTTP server as an adapter.
-
-## Public Surface (github.com/Adityarya11/StrataKV/engine)
-
-When you use StrataKV as a dependency:
-
-```bash
-go get github.com/Adityarya11/StrataKV
-```
-
-Your code imports the `engine` package and only sees the stable API:
-
-- `engine.Open()`
-- `db.Put()`
-- `db.Get()`
-- `db.Delete()`
-- `db.Close()`
-
-Example embedding:
-
-```go
-import "github.com/Adityarya11/StrataKV/engine"
-
-db, err := engine.Open("./data")
-if err != nil {
-   // handle error
-}
-defer db.Close()
-
-_ = db.Put([]byte("user:1"), []byte("aditya"))
-val, found := db.Get([]byte("user:1"))
-_ = db.Delete([]byte("user:1"))
-_ = val
-_ = found
-```
 
 ## Protected Core (internal/)
 
@@ -368,60 +340,9 @@ The database exposes a lightweight REST-style interface using Go’s built-in `n
 
 No external frameworks are used.
 
----
+## API Endpoints
 
-# API Endpoints
-
-Minimal route examples and demo bodies are in [test.md](test.md).
-
-## Insert / Update
-
-```http
-PUT /put
-```
-
-### Request Body
-
-```json
-{
-  "key": "user:101",
-  "value": "aditya"
-}
-```
-
----
-
-## Retrieve
-
-```http
-GET /get?key=user:101
-```
-
-### Response
-
-```json
-{
-  "key": "user:101",
-  "value": "aditya",
-  "found": true
-}
-```
-
----
-
-## Delete
-
-```http
-DELETE /delete?key=user:101
-```
-
----
-
-## Trigger Manual Compaction
-
-```http
-POST /compact
-```
+Minimal route examples and demo bodies are in [**test.md**](test.md).
 
 ---
 
