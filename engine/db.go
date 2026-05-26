@@ -1,3 +1,7 @@
+// Package engine provides the public API for the StrataKV storage engine.
+// It exposes a clean, thread-safe interface for key-value operations while
+// encapsulating the underlying Log-Structured Merge (LSM) tree mechanics,
+// MemTables, and Write-Ahead Logging (WAL).
 package engine
 
 import (
@@ -19,6 +23,9 @@ const (
 	walFileName     = "0001.wal"
 )
 
+// DB represents an active instance of the StrataKV storage engine.
+// It manages the active MemTable, Write-Ahead Log, and orchestrates
+// disk flushes. DB is thread-safe and safe for concurrent use across multiple goroutines.
 type DB struct {
 	mu             sync.RWMutex
 	mem            *memtable.MemTable
@@ -27,6 +34,10 @@ type DB struct {
 	segmentFilters map[string]*filter.BloomFilter
 }
 
+// Open initializes and mounts the StrataKV engine at the specified directory.
+// If the directory does not exist, it will be created. During initialization,
+// Open will automatically recover any un-flushed data by replaying the Write-Ahead Log (WAL)
+// and reconstruct the in-memory Bloom filters for fast reads.
 func Open(dataDir string) (*DB, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create the data dir: %w", err)
@@ -75,6 +86,9 @@ func Open(dataDir string) (*DB, error) {
 	return db, nil
 }
 
+// Put inserts or updates a key-value pair in the database.
+// The operation is synchronous; it first appends the entry to the WAL for strict
+// durability before mutating the in-memory MemTable.
 func (db *DB) Put(key, val []byte) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -135,6 +149,10 @@ func (db *DB) flushLocked() error {
 	return nil
 }
 
+// Get retrieves the value associated with a given key.
+// It follows a hierarchy of reads: checking the MemTable first, then probing
+// the in-memory Bloom filters to prune disk I/O, and finally searching the
+// immutable segment files on disk. Returns false if the key does not exist or was deleted.
 func (db *DB) Get(key []byte) ([]byte, bool) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -184,6 +202,9 @@ func (db *DB) Get(key []byte) ([]byte, bool) {
 
 }
 
+// Delete marks a key as deleted using a tombstone.
+// The key is not immediately removed from disk; instead, a tombstone record is
+// appended to the WAL and MemTable. The physical deletion occurs during the next Compaction cycle.
 func (db *DB) Delete(key []byte) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -197,6 +218,10 @@ func (db *DB) Delete(key []byte) error {
 	return nil
 }
 
+// Close safely shuts down the database.
+// It ensures that the Write-Ahead Log (WAL) is properly synchronized and closed,
+// preventing data corruption. This should always be called (usually via defer)
+// before an application exits.
 func (db *DB) Close() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()

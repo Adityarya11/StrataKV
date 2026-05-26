@@ -12,6 +12,10 @@ import (
 	"github.com/Adityarya11/StrataKV/internal/storage"
 )
 
+// Compact triggers a manual background compaction process.
+// It scans all immutable segment files on disk, merges them, and purges
+// stale data (overwritten keys and tombstones). This reclaims disk space
+// and reduces read amplification by consolidating fragmented segments into a single file.
 func (db *DB) Compact() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
