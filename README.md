@@ -1,6 +1,6 @@
 # StrataKV
 
-An embedded, LSM-tree-inspired key-value storage engine written in Go — Write-Ahead Log durability, immutable segment files, tombstone-based deletes, Bloom-filter-accelerated reads, and background compaction, exposed both as a Go library and a minimal HTTP server.
+An embedded, LSM-tree-inspired key-value storage engine written in Go — Write-Ahead Log durability, checksummed immutable segment files, tombstone-based deletes, Bloom-filter-accelerated reads, and compaction. Zero external dependencies.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/Adityarya11/StrataKV.svg)](https://pkg.go.dev/github.com/Adityarya11/StrataKV)
 
@@ -38,24 +38,12 @@ func main() {
 }
 ```
 
-To run StrataKV as a standalone HTTP server instead of embedding it:
-
-```bash
-go run cmd/stratakv/main.go
-# Server starts on http://localhost:8080
-```
-
-See [API.md](API.md) for the full HTTP reference.
-
 ---
 
 ## Architecture
 
 ```
-Client
-  │
-  ▼
-HTTP Server Layer (cmd/stratakv, internal/server)
+Application (imports engine)
   │
   ▼
 Storage Engine (engine)
@@ -71,17 +59,16 @@ Storage Engine (engine)
 
 **Read path:** `Get` checks the MemTable first, then walks segment files newest-to-oldest. For each segment, a Bloom filter check runs first — if the filter says "definitely not present," the segment is skipped entirely, avoiding a disk scan.
 
-**Compaction:** merges all segments into one, keeping only the latest version of each key and dropping tombstones whose deletes have now been physically applied. Triggered manually via `db.Compact()` or `POST /compact`.
+**Compaction:** merges all segments into one, keeping only the latest version of each key and dropping tombstones whose deletes have now been physically applied. Triggered via `db.Compact()`.
 
 ---
 
 ## Public API and Encapsulation
 
-StrataKV is usable two ways: as an embedded library, or as a standalone HTTP server.
+StrataKV is an embedded library. You import it into your process; there is no server, no wire protocol, and no network hop.
 
 - **`engine/`** — the public package. `Open`, `Put`, `Get`, `Delete`, `Compact`, `Close`. This is what you import.
 - **`internal/`** — WAL, MemTable, segment, and Bloom filter internals. Go's compiler enforces that nothing outside this module can import these packages, so the storage internals can change without breaking consumers of `engine`.
-- **`cmd/stratakv` + `internal/server`** — an optional HTTP adapter wrapping the engine in REST endpoints. Skip this entirely if you're embedding StrataKV directly (see the real integration example below).
 
 ---
 
@@ -152,19 +139,17 @@ These are intentional, documented tradeoffs of a learning-focused implementation
 
 ```
 StrataKV/
-├── cmd/stratakv/main.go        — HTTP server entrypoint
 ├── engine/
 │   ├── db.go                   — Open, Put, Get, Delete, Close, flush
 │   └── compaction.go           — Compact
 ├── internal/
 │   ├── filter/bloom.go         — Bloom filter
 │   ├── memtable/memtable.go    — in-memory write buffer
-│   ├── server/http.go          — REST handlers
 │   └── storage/
+│       ├── record.go           — shared checksummed record codec
 │       ├── wal.go              — Write-Ahead Log
 │       └── segment.go          — segment read/write/search
 ├── scripts/benchmark.go        — benchmark harness
-├── API.md
 ├── BENCHMARKS.md
 └── go.mod
 ```
