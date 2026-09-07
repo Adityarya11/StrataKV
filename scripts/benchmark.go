@@ -149,13 +149,17 @@ func main() {
 
 	compactionStart := time.Now()
 
-	if err := db.Compact(); err != nil {
+	compaction, err := db.Compact()
+	if err != nil {
 		log.Fatal(err)
 	}
 
 	compactionDuration := time.Since(compactionStart)
 
 	fmt.Printf("Compaction completed in %v\n", compactionDuration)
+	fmt.Printf("Merged %d segments: %d records in, %d out, %d tombstones purged\n",
+		compaction.SegmentsMerged, compaction.RecordsRead,
+		compaction.RecordsWritten, compaction.TombstonesPurged)
 
 	postCompactionSize := dirSize(dataDir)
 
@@ -226,7 +230,7 @@ func benchmarkReads(db *engine.DB) time.Duration {
 
 		key := "user:" + strconv.Itoa(keyID)
 
-		_, _ = db.Get([]byte(key))
+		_, _, _ = db.Get([]byte(key))
 	}
 
 	return time.Since(start) / readTests
@@ -241,7 +245,7 @@ func benchmarkMissingReads(db *engine.DB) time.Duration {
 		// Keys formulated like "missing:99999" are guaranteed not to be in the initial dataset
 		key := "missing_user:" + strconv.Itoa(i)
 
-		_, _ = db.Get([]byte(key))
+		_, _, _ = db.Get([]byte(key))
 	}
 
 	return time.Since(start) / readTests
