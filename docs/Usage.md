@@ -48,7 +48,10 @@ func CheckStrataKV() (bool, string) {
 		return false, "put failed: " + err.Error()
 	}
 
-	val, found := DB.Get([]byte(strataHealthKey))
+	val, found, err := DB.Get([]byte(strataHealthKey))
+	if err != nil {
+		return false, "get failed: " + err.Error()
+	}
 	if !found || string(val) != "ok" {
 		return false, "health check retrieval failed"
 	}
@@ -62,7 +65,12 @@ func GetCachedOutput(hashKey string) (string, bool) {
 		return "", false
 	}
 
-	val, found := DB.Get([]byte(hashKey))
+	val, found, err := DB.Get([]byte(hashKey))
+	if err != nil {
+		// A read error is not a cache miss — surface it, don't swallow it.
+		log.Printf("StrataKV read error for %s: %v", hashKey[:8], err)
+		return "", false
+	}
 	if !found {
 		return "", false
 	}

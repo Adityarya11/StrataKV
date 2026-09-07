@@ -31,7 +31,10 @@ func main() {
 
 	db.Put([]byte("user:101"), []byte("aditya"))
 
-	val, found := db.Get([]byte("user:101"))
+	val, found, err := db.Get([]byte("user:101"))
+	if err != nil {
+		panic(err) // an unreadable disk, not a missing key
+	}
 	fmt.Println(string(val), found) // aditya true
 
 	db.Delete([]byte("user:101"))
@@ -55,9 +58,11 @@ Storage Engine (engine)
   └── Compaction Engine          — merges segments, purges tombstones
 ```
 
-**Write path:** every `Put`/`Delete` is appended to the WAL and fsync'd before the MemTable is mutated, guaranteeing crash recovery. Once the MemTable crosses a 1 MiB threshold, it flushes to disk as a new immutable `.seg` file and a Bloom filter is built for it.
+**Write path:** every `Put`/`Delete` is appended to the WAL and fsync'd before the MemTable is mutated, guaranteeing crash recovery. Once the MemTable crosses a 1 MiB threshold, it flushes to disk as a new immutable `.seg` file, written under a temporary name and renamed into place so a reader never sees a partial segment.
 
 **Read path:** `Get` checks the MemTable first, then walks segment files newest-to-oldest. For each segment, a Bloom filter check runs first — if the filter says "definitely not present," the segment is skipped entirely, avoiding a disk scan.
+
+**Integrity:** every record carries a CRC-32C checksum, and every segment ends with a fixed-width trailer holding its Bloom filter. The trailer is written last, so its absence proves the file was never finished. A torn WAL tail — the ordinary artifact of a crash mid-write — is truncated and reported at startup rather than preventing the database from opening.
 
 **Compaction:** merges all segments into one, keeping only the latest version of each key and dropping tombstones whose deletes have now been physically applied. Triggered via `db.Compact()`.
 
@@ -95,7 +100,12 @@ func InitStrataKV(dataDir string) {
 }
 
 func GetCachedOutput(hashKey string) (string, bool) {
-	val, found := DB.Get([]byte(hashKey))
+	val, found, err := DB.Get([]byte(hashKey))
+	if err != nil {
+		// A read error is not a cache miss — surface it, don't swallow it.
+		log.Printf("StrataKV read error for %s: %v", hashKey[:8], err)
+		return "", false
+	}
 	return string(val), found
 }
 
@@ -110,7 +120,7 @@ func SaveCacheOutput(hashKey, output string) {
 
 ## Performance
 
-Full methodology and raw numbers are in [BENCHMARKS.md](BENCHMARKS.md). Headline results from a sustained append-heavy workload (50K writes, 200K overwrites, 80K tombstone deletes):
+Full methodology and raw numbers are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Headline results from a sustained append-heavy workload (50K writes, 200K overwrites, 80K tombstone deletes):
 
 | Metric                    | Before      | After                                   |
 | ------------------------- | ----------- | --------------------------------------- |
@@ -124,14 +134,16 @@ Full methodology and raw numbers are in [BENCHMARKS.md](BENCHMARKS.md). Headline
 
 ## Known Limitations
 
-These are intentional, documented tradeoffs of a learning-focused implementation, not oversights:
+Known and prioritised, not discovered in review:
 
+- **Compaction is never triggered automatically** — nothing calls `Compact()` on your behalf. Left alone, segments accumulate and read latency degrades. Drive it from `db.Stats()` until this is built in.
+- **No TTL or eviction** — StrataKV stores keys until you delete them. If you use it as a cache, bounding it is your job for now.
 - **Stop-the-world compaction and flush** — reads and writes block while either runs, under a single `sync.RWMutex`.
-- **Linear scan within a segment** — Bloom filters skip whole segments but don't avoid a sequential scan inside a candidate segment; no sparse index exists yet.
-- **Bit-per-bool Bloom filter** — `bitset []bool` uses 8x more memory than a packed bitset would.
-- **Fixed Bloom filter sizing** — every segment gets the same 10,000-bit / 3-hash filter regardless of how many keys it holds, so false-positive rates vary with segment size.
-- **No checksums** — segment files have no corruption detection; a partial write from a crash mid-flush would currently fail or misread silently rather than being caught explicitly.
-- **No replication, no transactions, single-node only.**
+- **Compaction merges in memory** — the whole database passes through one map, so peak memory scales with total data, not with segment count.
+- **Linear scan within a segment** — Bloom filters skip whole segments but don't avoid a sequential scan inside a candidate; no sparse index exists yet.
+- **One `fsync` per write** — durable, and the dominant cost of every write. There is no group commit or relaxed sync mode yet.
+- **No range scans or iteration** — the MemTable is a hash map, so keys have no order.
+- **No transactions, no MVCC, no replication. Single node.**
 
 ---
 
@@ -149,8 +161,9 @@ StrataKV/
 │       ├── record.go           — shared checksummed record codec
 │       ├── wal.go              — Write-Ahead Log
 │       └── segment.go          — segment read/write/search
+├── test/integration/           — black-box tests through the public API
 ├── scripts/benchmark.go        — benchmark harness
-├── BENCHMARKS.md
+├── docs/BENCHMARKS.md
 └── go.mod
 ```
 
