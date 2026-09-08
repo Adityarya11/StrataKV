@@ -129,16 +129,57 @@ func (w *WAL) isLegacy() (bool, error) {
 // Write appends one mutation and fsyncs before returning. A write that is only
 // in the page cache is a write the OS is free to lose.
 func (w *WAL) Write(tombstone bool, key, value []byte) error {
+	return w.Append([]Record{{Tombstone: tombstone, Key: key, Value: value}}, true)
+}
+
+// Append writes records as one atomic group: every record but the last is
+// marked pending, so recovery applies all of them or none.
+//
+// The whole group is assembled into one buffer and issued as a single write
+// followed by at most one fsync. That is what makes a batch cheaper than the
+// same writes made individually -- the fsync, not the write, is the cost.
+//
+// sync=false leaves the records in the page cache, which the OS is free to lose
+// on a crash. Durability then arrives at the next Sync, Reset, or Close.
+func (w *WAL) Append(recs []Record, sync bool) error {
+	if len(recs) == 0 {
+		return nil
+	}
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	buf := AppendRecord(make([]byte, 0, EncodedLen(key, value)), tombstone, key, value)
+	size := 0
+	for _, rec := range recs {
+		size += EncodedLen(rec.Key, rec.Value)
+	}
+
+	buf := make([]byte, 0, size)
+	for i, rec := range recs {
+		rec.Pending = i < len(recs)-1
+		buf = AppendRecord(buf, rec)
+	}
 
 	n, err := w.file.Write(buf)
 	w.size += int64(n)
 	if err != nil {
 		return fmt.Errorf("append to WAL: %w", err)
 	}
+
+	if !sync {
+		return nil
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("sync WAL: %w", err)
+	}
+
+	return nil
+}
+
+// Sync flushes buffered records to stable storage.
+func (w *WAL) Sync() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
 	if err := w.file.Sync(); err != nil {
 		return fmt.Errorf("sync WAL: %w", err)
@@ -181,6 +222,14 @@ func (w *WAL) replay(offset int64, apply func(bool, []byte, []byte)) (RecoveryRe
 	reader := io.Reader(w.file)
 	good := offset
 
+	// Records marked pending belong to a batch whose commit has not been read
+	// yet. They are held back so that a log ending mid-batch applies none of
+	// it -- the group is atomic or it never happened.
+	var (
+		pending  []Record
+		uncommit int64
+	)
+
 	for {
 		rec, n, err := ReadRecord(reader)
 		if errors.Is(err, io.EOF) {
@@ -191,9 +240,29 @@ func (w *WAL) replay(offset int64, apply func(bool, []byte, []byte)) (RecoveryRe
 			break
 		}
 
+		if rec.Pending {
+			pending = append(pending, rec)
+			uncommit += int64(n)
+			continue
+		}
+
+		for _, held := range pending {
+			apply(held.Tombstone, held.Key, held.Value)
+			report.RecordsApplied++
+		}
 		apply(rec.Tombstone, rec.Key, rec.Value)
 		report.RecordsApplied++
-		good += int64(n)
+
+		good += uncommit + int64(n)
+		pending, uncommit = nil, 0
+	}
+
+	// Records still held here never reached their commit, so the batch was cut
+	// short by a crash. good already stops before them, and the truncation
+	// below discards them -- which is the atomicity guarantee.
+	if len(pending) > 0 && report.TruncationCause == nil {
+		report.TruncationCause = fmt.Errorf("%w: batch of %d records has no commit",
+			ErrTorn, len(pending))
 	}
 
 	if good < w.size {
@@ -308,7 +377,7 @@ func (w *WAL) rewrite(records []Record) error {
 	buf = append(buf, walMagic...)
 	buf = binary.LittleEndian.AppendUint16(buf, walVersion)
 	for _, rec := range records {
-		buf = AppendRecord(buf, rec.Tombstone, rec.Key, rec.Value)
+		buf = AppendRecord(buf, rec)
 	}
 
 	if _, err := f.Write(buf); err != nil {

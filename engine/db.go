@@ -13,17 +13,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Adityarya11/StrataKV/internal/memtable"
-	"github.com/Adityarya11/StrataKV/internal/storage"
+	"github.com/Adityarya11/StrataKV/v2/internal/memtable"
+	"github.com/Adityarya11/StrataKV/v2/internal/storage"
 )
 
-const (
-	// maxMemTableSize is how large the in-memory buffer grows before it is
-	// flushed to an immutable segment.
-	maxMemTableSize = 1 << 20 // 1 MiB
-
-	walFileName = "0001.wal"
-)
+const walFileName = "0001.wal"
 
 // ErrEmptyKey reports a zero-length key. The record format uses a zero key
 // length to mean "these bytes are not a record", so storing one would make
@@ -45,6 +39,8 @@ type DB struct {
 	// re-sort on every Get.
 	segments []*storage.Segment
 
+	opts Options
+
 	// nextSeq is kept strictly increasing rather than read from the clock,
 	// whose resolution on Windows lets two flushes share a tick -- and two
 	// segments with one name means the second overwrites the first.
@@ -53,10 +49,22 @@ type DB struct {
 	lastRecovery storage.RecoveryReport
 }
 
-// Open mounts a database at dataDir, creating it if needed. Replays the
-// write-ahead log and loads every segment's index, failing if any segment does
-// not pass its integrity checks.
+// Open mounts a database at dataDir with DefaultOptions, creating the
+// directory if needed.
 func Open(dataDir string) (*DB, error) {
+	return OpenWith(dataDir, DefaultOptions())
+}
+
+// OpenWith mounts a database with an explicit configuration.
+//
+// It replays the write-ahead log to restore writes that had not yet been
+// flushed, and loads every segment's index. It fails if any segment does not
+// pass its integrity checks: a database that cannot vouch for its own files
+// should say so at startup rather than serve part of them.
+func OpenWith(dataDir string, opts Options) (*DB, error) {
+	if err := opts.validate(); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data directory %s: %w", dataDir, err)
 	}
@@ -64,6 +72,7 @@ func Open(dataDir string) (*DB, error) {
 	db := &DB{
 		mem:     memtable.New(),
 		dataDir: dataDir,
+		opts:    opts,
 	}
 
 	if err := db.loadSegments(); err != nil {
@@ -150,7 +159,10 @@ func (db *DB) Put(key, value []byte) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	if err := db.wal.Write(false, key, value); err != nil {
+	if err := db.wal.Append(
+		[]storage.Record{{Key: key, Value: value}},
+		db.opts.Sync == SyncAlways,
+	); err != nil {
 		return fmt.Errorf("log put: %w", err)
 	}
 	db.mem.Put(key, value)
@@ -169,7 +181,10 @@ func (db *DB) Delete(key []byte) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	if err := db.wal.Write(true, key, nil); err != nil {
+	if err := db.wal.Append(
+		[]storage.Record{{Tombstone: true, Key: key}},
+		db.opts.Sync == SyncAlways,
+	); err != nil {
 		return fmt.Errorf("log delete: %w", err)
 	}
 	db.mem.Delete(key)
@@ -230,7 +245,7 @@ func (db *DB) Has(key []byte) (bool, error) {
 
 // maybeFlushLocked flushes if the buffer crossed the threshold. Caller holds db.mu.
 func (db *DB) maybeFlushLocked() error {
-	if db.mem.ApproximateSize() < maxMemTableSize {
+	if db.mem.ApproximateSize() < db.opts.MemTableSize {
 		return nil
 	}
 
@@ -252,7 +267,7 @@ func (db *DB) flushLocked() error {
 	name := db.nextSegmentName()
 	path := filepath.Join(db.dataDir, name)
 
-	if err := storage.WriteSegment(path, data); err != nil {
+	if err := storage.WriteSegment(path, data, db.opts.FilterFalsePositiveRate); err != nil {
 		return fmt.Errorf("flush memtable to %s: %w", name, err)
 	}
 

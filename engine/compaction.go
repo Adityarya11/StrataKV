@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"slices"
 
-	"github.com/Adityarya11/StrataKV/internal/memtable"
-	"github.com/Adityarya11/StrataKV/internal/storage"
+	"github.com/Adityarya11/StrataKV/v2/internal/memtable"
+	"github.com/Adityarya11/StrataKV/v2/internal/storage"
 )
 
 // CompactionResult reports what a compaction cycle did.
@@ -82,7 +82,7 @@ func (db *DB) Compact() (CompactionResult, error) {
 
 	// Written under a temp name and renamed, so the sources are never removed
 	// against a partial file.
-	if err := storage.WriteSegment(path, surviving); err != nil {
+	if err := storage.WriteSegment(path, surviving, db.opts.FilterFalsePositiveRate); err != nil {
 		return result, fmt.Errorf("write compacted segment %s: %w", name, err)
 	}
 

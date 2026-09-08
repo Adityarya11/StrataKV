@@ -21,6 +21,12 @@ const (
 	recordHeaderSize = 13
 	flagTombstone    = 1 << 0
 
+	// flagPending marks a record that is part of an unfinished atomic batch.
+	// The last record of a batch leaves it clear, which commits the group.
+	// Records written before batches existed have it clear, so each commits
+	// itself and old logs replay unchanged.
+	flagPending = 1 << 1
+
 	// MaxRecordSize bounds one key-value pair. Its real job is on decode:
 	// garbage bytes routinely declare enormous lengths.
 	MaxRecordSize = 64 << 20
@@ -41,8 +47,13 @@ var (
 )
 
 // Record is one decoded key-value operation. A tombstone carries no value.
+//
+// Pending marks membership in an atomic batch whose committing record has not
+// been reached yet. Recovery buffers pending records and applies them only once
+// the commit arrives, so a crash mid-batch applies none of it.
 type Record struct {
 	Tombstone bool
+	Pending   bool
 	Key       []byte
 	Value     []byte
 }
@@ -56,17 +67,23 @@ func EncodedLen(key, value []byte) int {
 //
 // Assembled in a single buffer so it costs one write syscall rather than three,
 // which also narrows the window in which a crash can tear a record apart.
-func AppendRecord(dst []byte, tombstone bool, key, value []byte) []byte {
-	if tombstone {
+func AppendRecord(dst []byte, rec Record) []byte {
+	key, value := rec.Key, rec.Value
+	if rec.Tombstone {
 		value = nil
 	}
 
 	start := len(dst)
 	dst = append(dst, make([]byte, recordHeaderSize)...)
 
-	if tombstone {
-		dst[start+4] = flagTombstone
+	var flags byte
+	if rec.Tombstone {
+		flags |= flagTombstone
 	}
+	if rec.Pending {
+		flags |= flagPending
+	}
+	dst[start+4] = flags
 	binary.LittleEndian.PutUint32(dst[start+5:start+9], uint32(len(key)))
 	binary.LittleEndian.PutUint32(dst[start+9:start+13], uint32(len(value)))
 
@@ -129,6 +146,7 @@ func ReadRecord(r io.Reader) (Record, int, error) {
 
 	rec := Record{
 		Tombstone: flags&flagTombstone != 0,
+		Pending:   flags&flagPending != 0,
 		Key:       body[checksummed : checksummed+int(keyLen)],
 	}
 	if !rec.Tombstone {

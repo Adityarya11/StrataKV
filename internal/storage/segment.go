@@ -13,8 +13,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Adityarya11/StrataKV/internal/filter"
-	"github.com/Adityarya11/StrataKV/internal/memtable"
+	"github.com/Adityarya11/StrataKV/v2/internal/filter"
+	"github.com/Adityarya11/StrataKV/v2/internal/memtable"
 )
 
 // Segment file layout:
@@ -84,7 +84,7 @@ func ParseSegmentSequence(name string) (int64, bool) {
 // WriteSegment serialises data to a new segment at path. Built under a
 // temporary name and renamed only once durable, so a reader sees either no
 // file or a complete one.
-func WriteSegment(path string, data map[string]memtable.Entry) error {
+func WriteSegment(path string, data map[string]memtable.Entry, falsePositiveRate float64) error {
 	tmp := path + ".tmp"
 
 	f, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
@@ -100,7 +100,7 @@ func WriteSegment(path string, data map[string]memtable.Entry) error {
 		}
 	}()
 
-	if err := writeSegmentTo(f, data); err != nil {
+	if err := writeSegmentTo(f, data, falsePositiveRate); err != nil {
 		return err
 	}
 
@@ -121,17 +121,17 @@ func WriteSegment(path string, data map[string]memtable.Entry) error {
 	return nil
 }
 
-func writeSegmentTo(w io.Writer, data map[string]memtable.Entry) error {
+func writeSegmentTo(w io.Writer, data map[string]memtable.Entry, falsePositiveRate float64) error {
 	buf := make([]byte, 0, segmentHeader+len(data)*64)
 	buf = append(buf, segmentMagic...)
 	buf = binary.LittleEndian.AppendUint16(buf, segmentVersion)
 
 	// Sized here because this is the one moment the exact key count is known.
-	bloom := filter.NewOptimal(len(data), filter.DefaultFalsePositiveRate)
+	bloom := filter.NewOptimal(len(data), falsePositiveRate)
 
 	for k, entry := range data {
 		key := []byte(k)
-		buf = AppendRecord(buf, entry.Deleted, key, entry.Value)
+		buf = AppendRecord(buf, Record{Tombstone: entry.Deleted, Key: key, Value: entry.Value})
 		bloom.Add(key)
 	}
 

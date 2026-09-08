@@ -2,7 +2,7 @@
 
 An embedded, LSM-tree-inspired key-value storage engine written in Go — Write-Ahead Log durability, checksummed immutable segment files, tombstone-based deletes, Bloom-filter-accelerated reads, and compaction. Zero external dependencies.
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/Adityarya11/StrataKV.svg)](https://pkg.go.dev/github.com/Adityarya11/StrataKV)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Adityarya11/StrataKV/v2.svg)](https://pkg.go.dev/github.com/Adityarya11/StrataKV/v2)
 
 StrataKV exists to explore the core mechanics behind log-structured storage engines like LevelDB and RocksDB — durability, compaction, and the write/read amplification tradeoff — by building them from first principles rather than treating a database as a black box.
 
@@ -11,7 +11,7 @@ StrataKV exists to explore the core mechanics behind log-structured storage engi
 ## Quickstart
 
 ```bash
-go get github.com/Adityarya11/StrataKV@latest
+go get github.com/Adityarya11/StrataKV/v2@latest
 ```
 
 ```go
@@ -19,7 +19,7 @@ package main
 
 import (
 	"fmt"
-	stratakv "github.com/Adityarya11/StrataKV/engine"
+	stratakv "github.com/Adityarya11/StrataKV/v2/engine"
 )
 
 func main() {
@@ -72,8 +72,45 @@ Storage Engine (engine)
 
 StrataKV is an embedded library. You import it into your process; there is no server, no wire protocol, and no network hop.
 
-- **`engine/`** — the public package. `Open`, `Put`, `Get`, `Delete`, `Compact`, `Close`. This is what you import.
+- **`engine/`** — the public package. `Open`, `OpenWith`, `Put`, `Get`, `Delete`, `NewBatch`, `Flush`, `Compact`, `Stats`, `Close`. This is what you import.
 - **`internal/`** — WAL, MemTable, segment, and Bloom filter internals. Go's compiler enforces that nothing outside this module can import these packages, so the storage internals can change without breaking consumers of `engine`.
+
+### Configuration
+
+`Open` uses `DefaultOptions()`. `OpenWith` takes an explicit configuration:
+
+```go
+opts := stratakv.DefaultOptions()
+opts.MemTableSize = 4 << 20                  // flush every 4 MiB instead of 1
+opts.FilterFalsePositiveRate = 0.001         // more accurate filters, more memory
+opts.Sync = stratakv.SyncNever               // see below
+
+db, err := stratakv.OpenWith("./data", opts)
+```
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `MemTableSize` | 1 MiB | Bigger buffers mean fewer, larger segments — less read amplification and less compaction, at the cost of memory and a longer pause per flush. |
+| `Sync` | `SyncAlways` | `SyncAlways` fsyncs before every write returns. `SyncNever` fsyncs only on `Flush`, `Compact`, and `Close`. |
+| `FilterFalsePositiveRate` | 0.01 | How often a read touches a segment that cannot hold the key. ~9.6 bits per key at 0.01, ~14.4 at 0.001. |
+
+**On `SyncNever`:** an fsync costs milliseconds where the rest of a write costs microseconds, so it dominates write throughput. `SyncNever` gives that back, and in exchange writes made since the last sync are lost if the machine loses power or the process is killed. A clean `Close` loses nothing. It is the right choice when the data can be regenerated — a compile cache, a derived index — and the wrong choice when it is the only copy.
+
+### Batching
+
+A batch applies atomically and shares a single fsync:
+
+```go
+batch := db.NewBatch()
+for _, item := range items {
+	batch.Put(item.Key, item.Value)
+}
+if err := batch.Commit(); err != nil {
+	return err
+}
+```
+
+Both properties matter. **Cost:** a thousand writes in a batch pay roughly one write's worth of durability overhead instead of a thousand. **Correctness:** every record but the last is written with a pending marker, so a crash mid-batch leaves the database as though the batch never happened — recovery applies all of it or none.
 
 ---
 
@@ -86,7 +123,7 @@ package cache
 
 import (
 	"log"
-	stratakv "github.com/Adityarya11/StrataKV/engine"
+	stratakv "github.com/Adityarya11/StrataKV/v2/engine"
 )
 
 var DB *stratakv.DB
@@ -120,15 +157,22 @@ func SaveCacheOutput(hashKey, output string) {
 
 ## Performance
 
-Full methodology and raw numbers are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Headline results from a sustained append-heavy workload (50K writes, 200K overwrites, 80K tombstone deletes):
+> **These numbers are being re-measured and should not be relied on yet.** They
+> were taken on v1.0.x with an ad-hoc harness that reports means, which hide the
+> flush and compaction pauses that dominate an LSM's tail. The read-latency rows
+> in particular do not reconcile with the filter parameters that produced them.
+> A proper harness — `testing.B`, `benchstat` for significance, and p50/p99/p99.9
+> percentiles — is the next piece of work, and this section will be replaced with
+> its output.
 
-| Metric                    | Before      | After                                   |
-| ------------------------- | ----------- | --------------------------------------- |
-| Segment count             | 1,945       | 2 (post-compaction)                     |
-| Disk usage                | 1,953.79 MB | 393.42 MB (-79.86%)                     |
-| GET latency, existing key | 1.23s       | 175 µs (post-compaction + Bloom filter) |
-| GET latency, missing key  | 2.07s       | 163 µs (post-compaction + Bloom filter) |
-| WAL crash recovery        | —           | 446.8 ms for the full workload          |
+What the compaction figures below do show reliably is the structural effect, measured over 50K writes, 200K overwrites and 80K deletes:
+
+| Metric        | Before      | After               |
+| ------------- | ----------- | ------------------- |
+| Segment count | 1,945       | 2 (post-compaction) |
+| Disk usage    | 1,953.79 MB | 393.42 MB (−79.86%) |
+
+Full methodology is in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ---
 
@@ -141,7 +185,7 @@ Known and prioritised, not discovered in review:
 - **Stop-the-world compaction and flush** — reads and writes block while either runs, under a single `sync.RWMutex`.
 - **Compaction merges in memory** — the whole database passes through one map, so peak memory scales with total data, not with segment count.
 - **Linear scan within a segment** — Bloom filters skip whole segments but don't avoid a sequential scan inside a candidate; no sparse index exists yet.
-- **One `fsync` per write** — durable, and the dominant cost of every write. There is no group commit or relaxed sync mode yet.
+- **One `fsync` per write in the default mode** — durable, and the dominant cost of every write. `SyncNever` and batching both amortise it; automatic group commit does not exist yet.
 - **No range scans or iteration** — the MemTable is a hash map, so keys have no order.
 - **No transactions, no MVCC, no replication. Single node.**
 
@@ -152,7 +196,9 @@ Known and prioritised, not discovered in review:
 ```
 StrataKV/
 ├── engine/
-│   ├── db.go                   — Open, Put, Get, Delete, Close, flush
+│   ├── db.go                   — Open, Put, Get, Delete, Flush, Stats, Close
+│   ├── options.go              — Options, SyncMode
+│   ├── batch.go                — atomic, fsync-amortising batches
 │   └── compaction.go           — Compact
 ├── internal/
 │   ├── filter/bloom.go         — Bloom filter

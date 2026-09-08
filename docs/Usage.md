@@ -9,7 +9,7 @@ By hashing incoming C++ source code via SHA-256, the backend queries StrataKV to
 To use StrataKV as an embedded engine in your own Go projects:
 
 ```bash
-go get github.com/Adityarya11/StrataKV@latest
+go get github.com/Adityarya11/StrataKV/v2@latest
 ```
 
 ### 2. Example: Integrating as a Cache Wrapper
@@ -22,7 +22,7 @@ package cache
 import (
 	"log"
 
-	stratakv "github.com/Adityarya11/StrataKV/engine"
+	stratakv "github.com/Adityarya11/StrataKV/v2/engine"
 )
 
 var DB *stratakv.DB

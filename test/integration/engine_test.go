@@ -17,7 +17,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Adityarya11/StrataKV/engine"
+	"github.com/Adityarya11/StrataKV/v2/engine"
 )
 
 func open(t *testing.T, dir string) *engine.DB {
@@ -370,5 +370,170 @@ func TestStatsReflectDatabaseShape(t *testing.T) {
 	}
 	if stats.LegacySegments != 0 {
 		t.Errorf("LegacySegments = %d for a freshly created database", stats.LegacySegments)
+	}
+}
+
+func TestBatchAppliesAllWrites(t *testing.T) {
+	dir := t.TempDir()
+	db := open(t, dir)
+	defer db.Close()
+
+	batch := db.NewBatch()
+	for i := range 500 {
+		if err := batch.Put(fmt.Appendf(nil, "key%03d", i), []byte("value")); err != nil {
+			t.Fatalf("Batch.Put: %v", err)
+		}
+	}
+	if err := batch.Delete([]byte("key000")); err != nil {
+		t.Fatalf("Batch.Delete: %v", err)
+	}
+
+	if got := batch.Len(); got != 501 {
+		t.Errorf("Len = %d, want 501", got)
+	}
+
+	if err := batch.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if got := batch.Len(); got != 0 {
+		t.Errorf("Len = %d after Commit, want a reset batch", got)
+	}
+
+	// Later writes to the same key win, exactly as separate writes would.
+	if _, found := mustGet(t, db, "key000"); found {
+		t.Error("a delete staged after a put did not win")
+	}
+	for i := 1; i < 500; i++ {
+		if _, found := mustGet(t, db, fmt.Sprintf("key%03d", i)); !found {
+			t.Fatalf("key%03d missing after Commit", i)
+		}
+	}
+}
+
+func TestBatchSurvivesReopen(t *testing.T) {
+	dir := t.TempDir()
+
+	db := open(t, dir)
+	batch := db.NewBatch()
+	for i := range 100 {
+		if err := batch.Put(fmt.Appendf(nil, "key%03d", i), []byte("value")); err != nil {
+			t.Fatalf("Batch.Put: %v", err)
+		}
+	}
+	if err := batch.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	db.Close()
+
+	reopened := open(t, dir)
+	defer reopened.Close()
+
+	for i := range 100 {
+		if _, found := mustGet(t, reopened, fmt.Sprintf("key%03d", i)); !found {
+			t.Fatalf("key%03d did not survive the reopen", i)
+		}
+	}
+}
+
+func TestBatchIsAtomicAcrossACrash(t *testing.T) {
+	// A batch reaches the log as one group, with every record but the last
+	// marked pending. Truncating the tail simulates a crash mid-write: recovery
+	// must apply none of the batch rather than a prefix of it.
+	dir := t.TempDir()
+
+	db := open(t, dir)
+	mustPut(t, db, "before", "batch")
+
+	batch := db.NewBatch()
+	for i := range 50 {
+		if err := batch.Put(fmt.Appendf(nil, "batched%02d", i), []byte("value")); err != nil {
+			t.Fatalf("Batch.Put: %v", err)
+		}
+	}
+	if err := batch.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	db.Close()
+
+	wal := filepath.Join(dir, "0001.wal")
+	info, err := os.Stat(wal)
+	if err != nil {
+		t.Fatalf("stat WAL: %v", err)
+	}
+	// Cut the committing record, leaving the batch without its commit marker.
+	if err := os.Truncate(wal, info.Size()-10); err != nil {
+		t.Fatalf("truncate WAL: %v", err)
+	}
+
+	reopened, err := engine.Open(dir)
+	if err != nil {
+		t.Fatalf("Open after a torn batch: %v", err)
+	}
+	defer reopened.Close()
+
+	// The write that preceded the batch is committed and must survive.
+	if _, found := mustGet(t, reopened, "before"); !found {
+		t.Error("a committed write before the batch was lost")
+	}
+
+	// Not one record of the uncommitted batch may be applied.
+	for i := range 50 {
+		if _, found := mustGet(t, reopened, fmt.Sprintf("batched%02d", i)); found {
+			t.Fatalf("batched%02d was applied from a batch that never committed", i)
+		}
+	}
+}
+
+func TestOptionsAreHonoured(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := engine.DefaultOptions()
+	opts.MemTableSize = 8 << 10 // tiny, so a small workload still flushes
+	opts.Sync = engine.SyncNever
+
+	db, err := engine.OpenWith(dir, opts)
+	if err != nil {
+		t.Fatalf("OpenWith: %v", err)
+	}
+
+	value := make([]byte, 512)
+	for i := range 200 {
+		mustPut(t, db, fmt.Sprintf("key%03d", i), string(value))
+	}
+
+	if stats := db.Stats(); stats.Segments < 2 {
+		t.Errorf("Segments = %d; an 8 KiB buffer should have flushed repeatedly", stats.Segments)
+	}
+
+	// SyncNever still owes durability at Close.
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened := open(t, dir)
+	defer reopened.Close()
+
+	for i := range 200 {
+		if _, found := mustGet(t, reopened, fmt.Sprintf("key%03d", i)); !found {
+			t.Fatalf("key%03d lost across a clean Close in SyncNever mode", i)
+		}
+	}
+}
+
+func TestInvalidOptionsRejected(t *testing.T) {
+	for name, opts := range map[string]engine.Options{
+		"zero memtable":     {MemTableSize: 0, FilterFalsePositiveRate: 0.01},
+		"negative memtable": {MemTableSize: -1, FilterFalsePositiveRate: 0.01},
+		"rate of zero":      {MemTableSize: 1 << 20, FilterFalsePositiveRate: 0},
+		"rate of one":       {MemTableSize: 1 << 20, FilterFalsePositiveRate: 1},
+		"unknown sync mode": {MemTableSize: 1 << 20, FilterFalsePositiveRate: 0.01, Sync: 99},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// Substituting a default the caller did not ask for would be worse
+			// than refusing: they would get durability they did not choose.
+			if _, err := engine.OpenWith(t.TempDir(), opts); !errors.Is(err, engine.ErrInvalidOptions) {
+				t.Errorf("OpenWith = %v, want ErrInvalidOptions", err)
+			}
+		})
 	}
 }
