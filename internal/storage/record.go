@@ -9,7 +9,7 @@ import (
 	"io"
 )
 
-// One record layout, shared by the WAL and by segment files:
+// The WAL and the segment files share one record layout:
 //
 //	+--------+-------+--------+--------+-----+-------+
 //	| crc32c | flags | keyLen | valLen | key | value |
@@ -21,36 +21,32 @@ const (
 	recordHeaderSize = 13
 	flagTombstone    = 1 << 0
 
-	// flagPending marks a record that is part of an unfinished atomic batch.
-	// The last record of a batch leaves it clear, which commits the group.
-	// Records written before batches existed have it clear, so each commits
-	// itself and old logs replay unchanged.
+	// Set on every record of a batch except the last. The unset one commits
+	// the group. Older records never have it, so each one commits itself.
 	flagPending = 1 << 1
 
-	// MaxRecordSize bounds one key-value pair. Its real job is on decode:
-	// garbage bytes routinely declare enormous lengths.
+	// MaxRecordSize is the most a key and value can add up to. It mostly exists
+	// for decoding: garbage bytes often declare a huge length.
 	MaxRecordSize = 64 << 20
 )
 
-// CRC-32C: hardware-accelerated on amd64 and arm64, unlike the IEEE polynomial.
+// CRC-32C has a hardware instruction on amd64 and arm64.
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
 func newCRC() hash.Hash32 { return crc32.New(crcTable) }
 
 var (
-	// ErrTorn reports a record that ends before its declared length: a process
-	// died mid-write. Expected at a WAL tail, corruption anywhere else.
+	// ErrTorn means a record ends before its declared length, which is what a
+	// crash mid-write leaves. Normal at the end of a WAL, a problem anywhere else.
 	ErrTorn = errors.New("stratakv/storage: incomplete record")
 
-	// ErrCorrupt reports a structurally complete record that fails verification.
+	// ErrCorrupt means a complete record failed its checks.
 	ErrCorrupt = errors.New("stratakv/storage: corrupt record")
 )
 
-// Record is one decoded key-value operation. A tombstone carries no value.
-//
-// Pending marks membership in an atomic batch whose committing record has not
-// been reached yet. Recovery buffers pending records and applies them only once
-// the commit arrives, so a crash mid-batch applies none of it.
+// Record is one decoded operation. A tombstone has no value. Pending means the
+// record belongs to a batch whose commit hasn't been seen yet; recovery holds
+// those back and drops them if the commit never arrives.
 type Record struct {
 	Tombstone bool
 	Pending   bool
@@ -58,15 +54,14 @@ type Record struct {
 	Value     []byte
 }
 
-// EncodedLen reports the byte count AppendRecord will produce.
+// EncodedLen is the size AppendRecord will produce.
 func EncodedLen(key, value []byte) int {
 	return recordHeaderSize + len(key) + len(value)
 }
 
-// AppendRecord appends one encoded record to dst.
-//
-// Assembled in a single buffer so it costs one write syscall rather than three,
-// which also narrows the window in which a crash can tear a record apart.
+// AppendRecord appends the encoded record to dst. Building it in one buffer
+// means one write call instead of three, and a smaller window for a crash to
+// split a record.
 func AppendRecord(dst []byte, rec Record) []byte {
 	key, value := rec.Key, rec.Value
 	if rec.Tombstone {
@@ -90,16 +85,15 @@ func AppendRecord(dst []byte, rec Record) []byte {
 	dst = append(dst, key...)
 	dst = append(dst, value...)
 
-	// Checksum everything past the checksum field, then backfill it.
+	// checksum everything after the checksum field, then fill it in
 	binary.LittleEndian.PutUint32(dst[start:start+4], crc32.Checksum(dst[start+4:], crcTable))
 
 	return dst
 }
 
-// ReadRecord decodes one record and reports the bytes consumed.
-//
-// The three failure modes are distinct and callers act on them differently:
-// io.EOF (clean boundary), ErrTorn (unusable tail), ErrCorrupt (bad data).
+// ReadRecord decodes one record and returns how many bytes it used. It ends
+// three ways, and callers treat them differently: io.EOF for a clean end,
+// ErrTorn for a record cut short, ErrCorrupt for one that doesn't check out.
 func ReadRecord(r io.Reader) (Record, int, error) {
 	var hdr [recordHeaderSize]byte
 
@@ -117,9 +111,9 @@ func ReadRecord(r io.Reader) (Record, int, error) {
 		valLen = binary.LittleEndian.Uint32(hdr[9:13])
 	)
 
-	// A zero-length key is never written, so this is not a record. Catches the
-	// zero-filled tail NTFS can leave behind, with a clearer diagnosis than a
-	// checksum mismatch would give.
+	// a zero-length key is never written, so this isn't a record. NTFS can
+	// leave a zero-filled tail after a crash, and this gives a clearer error
+	// than a checksum mismatch would
 	if keyLen == 0 {
 		return Record{}, 0, fmt.Errorf("%w: zero-length key", ErrCorrupt)
 	}
@@ -128,7 +122,7 @@ func ReadRecord(r io.Reader) (Record, int, error) {
 			ErrCorrupt, uint64(keyLen)+uint64(valLen), MaxRecordSize)
 	}
 
-	// Verify over one contiguous buffer: header bytes after the CRC, then payload.
+	// the checksummed bytes in one buffer: header after the CRC, then the payload
 	const checksummed = recordHeaderSize - 4
 
 	body := make([]byte, checksummed+int(keyLen)+int(valLen))

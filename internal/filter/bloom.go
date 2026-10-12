@@ -1,11 +1,8 @@
-// Package filter implements a Bloom filter: a probabilistic set-membership
-// structure that answers either "definitely not present" or "possibly present",
-// never "definitely present".
+// Package filter is a Bloom filter. It answers "definitely not here" or
+// "maybe here", never "definitely here".
 //
-// StrataKV keeps one filter per segment file. Before a read touches the disk,
-// the filter is consulted; a negative answer skips the segment entirely. That
-// is what keeps read amplification bounded as segments accumulate, and it is
-// why the filter's accuracy has to track the size of the segment it guards.
+// There is one filter per segment. A read asks it first and skips the segment
+// on a "no", which is what keeps reads cheap as segments pile up.
 package filter
 
 import (
@@ -17,49 +14,43 @@ import (
 	"math/bits"
 )
 
-// ErrMalformed reports an encoded filter that is truncated or self-inconsistent.
+// ErrMalformed is returned for an encoded filter that is truncated or
+// inconsistent.
 var ErrMalformed = errors.New("stratakv/filter: malformed encoded filter")
 
 const (
-	// DefaultFalsePositiveRate is the target rate used when a caller has no
-	// reason to pick its own. At 1%, 99 of every 100 segments that cannot
-	// contain a key are skipped without a disk read.
+	// DefaultFalsePositiveRate is 1%.
 	DefaultFalsePositiveRate = 0.01
 
-	// minBits floors the bit array so that a segment holding a handful of keys
-	// still gets a filter with sane behaviour rather than a degenerate one.
+	// floor for the bit array, so a segment with a handful of keys still gets a
+	// usable filter
 	minBits = 512
 
-	// maxBits caps a single filter at 32 MiB of bit array (~28M keys at 1%),
-	// well beyond any segment this engine produces.
+	// 32 MiB of bits, far more than any segment here needs
 	maxBits = 1 << 28
 
-	// maxHashes bounds probe cost. Beyond ~16 probes the marginal accuracy is
-	// not worth the cache misses.
+	// past about 16 probes the extra accuracy isn't worth the cache misses
 	maxHashes = 16
 
-	// encodedHeaderSize is the fixed prefix of MarshalBinary: m uint32, k uint8.
+	// m (uint32) and k (uint8) at the front of the encoded form
 	encodedHeaderSize = 5
 )
 
-// BloomFilter is a fixed-capacity Bloom filter backed by a packed bit array.
+// BloomFilter is a fixed-size Bloom filter on a packed bit array. It is sized
+// once from the number of keys it will hold and doesn't grow. Adding many more
+// keys than that doesn't make it wrong, but the false-positive rate climbs
+// until it stops being useful.
 //
-// A filter is sized once, at construction, from the number of keys it will
-// hold; it does not grow. Adding substantially more keys than it was sized for
-// degrades the false-positive rate rather than producing incorrect answers —
-// the filter stays correct but stops being useful.
-//
-// A BloomFilter is not safe for concurrent mutation. In StrataKV a filter is
-// built once while its segment is being written and is immutable thereafter,
-// so concurrent MightContain calls are safe.
+// A filter is built while its segment is written and never changed after, so
+// concurrent MightContain calls are safe.
 type BloomFilter struct {
 	bits []uint64 // packed bit array, 64 bits per word
 	m    uint32   // bit capacity
 	k    uint8    // number of probes per key
 }
 
-// New returns a filter with an explicit bit capacity and probe count.
-// Prefer NewOptimal unless you have a specific reason to fix both parameters.
+// New returns a filter with a fixed number of bits and probes. NewOptimal is
+// usually what you want.
 func New(m uint32, k uint8) *BloomFilter {
 	switch {
 	case m < minBits:
@@ -80,15 +71,15 @@ func New(m uint32, k uint8) *BloomFilter {
 	}
 }
 
-// NewOptimal sizes a filter to hold n keys at a target false-positive rate p,
-// using the standard closed-form optima for a Bloom filter:
+// NewOptimal sizes a filter for n keys at false-positive rate p, using the
+// standard formulas:
 //
-//	m = -n·ln(p) / (ln 2)²        (bits)
-//	k = (m/n)·ln 2                (probes)
+//	m = -n * ln(p) / (ln 2)^2     bits
+//	k = (m / n) * ln 2            probes
 //
-// At p = 0.01 this works out to roughly 9.6 bits and 7 probes per key. Sizing
-// from n is the whole point: a filter that is fixed while n varies is either
-// wasting memory on small segments or saturated and useless on large ones.
+// At p = 0.01 that is about 9.6 bits and 7 probes per key. The size has to
+// follow n. A fixed size wastes memory on small segments and saturates on big
+// ones.
 func NewOptimal(n int, p float64) *BloomFilter {
 	if n < 1 {
 		n = 1
@@ -110,7 +101,7 @@ func NewOptimal(n int, p float64) *BloomFilter {
 	return New(uint32(m), uint8(math.Min(k, maxHashes)))
 }
 
-// Add records a key in the filter.
+// Add puts a key in the filter.
 func (b *BloomFilter) Add(key []byte) {
 	h1, h2 := seeds(key)
 	for i := uint8(0); i < b.k; i++ {
@@ -119,11 +110,8 @@ func (b *BloomFilter) Add(key []byte) {
 	}
 }
 
-// MightContain reports whether the key may be present.
-//
-// False means the key is definitely absent — that answer is exact, and it is
-// the one the read path relies on. True means the key is probably present, at
-// the filter's configured false-positive rate.
+// MightContain reports whether the key may be present. False is exact: the key
+// was never added. True can be a false positive.
 func (b *BloomFilter) MightContain(key []byte) bool {
 	h1, h2 := seeds(key)
 	for i := uint8(0); i < b.k; i++ {
@@ -135,22 +123,16 @@ func (b *BloomFilter) MightContain(key []byte) bool {
 	return true
 }
 
-// probe returns the bit index of the i'th probe for a key.
-//
-// This is Kirsch-Mitzenmacher double hashing: k independent-enough probes are
-// synthesised from two hashes as h1 + i·h2, which is provably as accurate as k
-// real hash functions for Bloom filter purposes and far cheaper. The
-// arithmetic widens to uint64 so that h1 + i·h2 cannot wrap before the modulo
-// and skew the distribution.
+// probe is the bit index for the i-th probe. It uses double hashing
+// (Kirsch-Mitzenmacher): h1 + i*h2 stands in for k separate hash functions.
+// The sum is done in 64 bits so it can't wrap before the modulo.
 func (b *BloomFilter) probe(i uint8, h1, h2 uint32) uint32 {
 	return uint32((uint64(h1) + uint64(i)*uint64(h2)) % uint64(b.m))
 }
 
-// seeds derives two hashes from one 64-bit FNV-1a digest.
-//
-// h2 is forced odd. If h2 shared a factor with m the probe sequence
-// h1 + i·h2 would revisit a short cycle of bit positions instead of spreading
-// across the array, quietly inflating the false-positive rate.
+// seeds splits one 64-bit FNV-1a hash into two. h2 is forced odd: if it shared
+// a factor with m, the probes would cycle through a few bits and the
+// false-positive rate would creep up.
 func seeds(key []byte) (h1, h2 uint32) {
 	h := fnv.New64a()
 	_, _ = h.Write(key) // hash.Hash.Write never returns an error
@@ -159,15 +141,13 @@ func seeds(key []byte) (h1, h2 uint32) {
 	return uint32(sum), uint32(sum>>32) | 1
 }
 
-// Bits reports the filter's bit capacity.
+// Bits is the size of the bit array.
 func (b *BloomFilter) Bits() uint32 { return b.m }
 
-// Hashes reports the number of probes performed per key.
+// Hashes is the number of probes per key.
 func (b *BloomFilter) Hashes() uint8 { return b.k }
 
-// FalsePositiveRate estimates the filter's current false-positive rate from
-// how full the bit array actually is, rather than from the key count it was
-// sized for. Useful for asserting in tests and for reporting metrics.
+// FalsePositiveRate estimates the current rate from how full the bit array is.
 func (b *BloomFilter) FalsePositiveRate() float64 {
 	set := 0
 	for _, w := range b.bits {
@@ -177,10 +157,8 @@ func (b *BloomFilter) FalsePositiveRate() float64 {
 }
 
 // MarshalBinary encodes the filter as [m uint32][k uint8][packed bits].
-//
-// Segment files carry their filter in a trailer so that opening a database
-// costs one small read per segment instead of a full rescan of every byte on
-// disk to rebuild filters from scratch.
+// Segments store their filter this way, so opening one doesn't mean rescanning
+// it to rebuild the filter.
 func (b *BloomFilter) MarshalBinary() ([]byte, error) {
 	out := make([]byte, encodedHeaderSize+len(b.bits)*8)
 
@@ -193,10 +171,9 @@ func (b *BloomFilter) MarshalBinary() ([]byte, error) {
 	return out, nil
 }
 
-// Unmarshal decodes a filter produced by MarshalBinary. It validates that the
-// declared bit capacity matches the number of bytes supplied, so a truncated
-// or garbled trailer is rejected rather than silently producing a filter that
-// answers "definitely absent" for keys that are present.
+// Unmarshal decodes the output of MarshalBinary. It checks that the declared
+// size matches the bytes given. A short bit array would answer "not here" for
+// keys that are there, so a damaged filter has to be rejected.
 func Unmarshal(data []byte) (*BloomFilter, error) {
 	if len(data) < encodedHeaderSize {
 		return nil, fmt.Errorf("%w: %d bytes is shorter than the %d byte header",

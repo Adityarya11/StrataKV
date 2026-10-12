@@ -32,21 +32,21 @@ const (
 	trailerMagic = "STRATAFT"
 	trailerSize  = 8 + 4 + 4 + 4 + len(trailerMagic) // 28
 
-	// SegmentSuffix is the filename extension for segment files.
+	// SegmentSuffix is the extension of segment files.
 	SegmentSuffix = ".seg"
 )
 
 var (
-	// ErrIncompleteSegment reports a segment whose trailer is missing or
-	// invalid: the file was never finished being written.
+	// ErrIncompleteSegment means the trailer is missing or invalid, so the file
+	// was never finished.
 	ErrIncompleteSegment = errors.New("stratakv/storage: segment is incomplete")
 
-	// ErrUnknownSegmentVersion reports a segment written by a newer build.
+	// ErrUnknownSegmentVersion means the segment came from a newer version.
 	ErrUnknownSegmentVersion = errors.New("stratakv/storage: unrecognised segment format version")
 )
 
-// Segment is a read handle on one immutable segment file. Opening one loads
-// only the header, trailer, and filter; records are read on demand.
+// Segment is a handle on one immutable segment file. Opening it loads the
+// header, trailer and filter. Records are read when needed.
 type Segment struct {
 	path       string
 	name       string
@@ -58,16 +58,16 @@ type Segment struct {
 	legacy     bool
 }
 
-// SegmentName renders a segment filename. Zero padding keeps lexicographic and
-// numeric order identical.
+// SegmentName builds a segment filename. The zero padding makes name order
+// match sequence order.
 func SegmentName(seq int64) string {
 	return fmt.Sprintf("%020d%s", seq, SegmentSuffix)
 }
 
-// ParseSegmentSequence extracts a segment's sequence number, reporting false
-// for names that are not segments. Parsed numerically, never string-compared:
-// unpadded legacy names would otherwise sort against padded ones by first
-// character and invert newest-first order.
+// ParseSegmentSequence returns the sequence number in a segment's filename, or
+// false if the name isn't a segment. Compare these as numbers, not strings:
+// older names aren't zero padded, so a string comparison would order them
+// wrongly.
 func ParseSegmentSequence(name string) (int64, bool) {
 	if !strings.HasSuffix(name, SegmentSuffix) {
 		return 0, false
@@ -81,9 +81,8 @@ func ParseSegmentSequence(name string) (int64, bool) {
 	return seq, true
 }
 
-// WriteSegment serialises data to a new segment at path. Built under a
-// temporary name and renamed only once durable, so a reader sees either no
-// file or a complete one.
+// WriteSegment writes data as a new segment at path. It writes a temp file and
+// renames it once the data is on disk, so a reader never sees a partial segment.
 func WriteSegment(path string, data map[string]memtable.Entry, falsePositiveRate float64) error {
 	tmp := path + ".tmp"
 
@@ -92,7 +91,7 @@ func WriteSegment(path string, data map[string]memtable.Entry, falsePositiveRate
 		return fmt.Errorf("create segment %s: %w", tmp, err)
 	}
 
-	// Clean up on failure so a full disk leaves no debris for the next open.
+	// remove the temp file on failure so a full disk doesn't leave junk behind
 	defer func() {
 		if f != nil {
 			f.Close()
@@ -126,7 +125,7 @@ func writeSegmentTo(w io.Writer, data map[string]memtable.Entry, falsePositiveRa
 	buf = append(buf, segmentMagic...)
 	buf = binary.LittleEndian.AppendUint16(buf, segmentVersion)
 
-	// Sized here because this is the one moment the exact key count is known.
+	// sized here, when the exact key count is known
 	bloom := filter.NewOptimal(len(data), falsePositiveRate)
 
 	for k, entry := range data {
@@ -152,8 +151,8 @@ func writeSegmentTo(w io.Writer, data map[string]memtable.Entry, falsePositiveRa
 	return nil
 }
 
-// appendTrailer writes the fixed-width footer. Its checksum covers both the
-// trailer fields and the encoded filter.
+// appendTrailer writes the fixed-size footer. Its checksum covers the trailer
+// fields and the encoded filter.
 func appendTrailer(dst []byte, bloomOffset uint64, bloomLen, entryCount uint32, bloomBytes []byte) []byte {
 	fields := make([]byte, 0, 16)
 	fields = binary.LittleEndian.AppendUint64(fields, bloomOffset)
@@ -176,8 +175,8 @@ func crc32Combine(a, b []byte) uint32 {
 	return h.Sum32()
 }
 
-// OpenSegment opens a segment, loading its trailer and filter. A file failing
-// any structural check is refused rather than read as far as it happens to
+// OpenSegment opens a segment and loads its trailer and filter. A file that
+// fails any structural check is rejected, not read as far as it happens to
 // parse.
 func OpenSegment(path string) (*Segment, error) {
 	f, err := os.Open(path)
@@ -285,9 +284,9 @@ func (s *Segment) loadV1(f *os.File, size int64) error {
 	return nil
 }
 
-// loadLegacy handles pre-header segments. No checksums and no index, so the
-// filter is rebuilt by reading the whole file. The first compaction rewrites
-// them in the current format and this cost disappears.
+// loadLegacy handles segments from before headers existed. They have no
+// checksums and no filter, so the filter is rebuilt by reading the whole file.
+// The first compaction rewrites them and the cost goes away.
 func (s *Segment) loadLegacy(f *os.File, size int64) error {
 	s.legacy = true
 	s.dataStart = 0
@@ -326,15 +325,15 @@ func (s *Segment) EntryCount() int { return s.entryCount }
 // Legacy reports whether the segment predates the checksummed format.
 func (s *Segment) Legacy() bool { return s.legacy }
 
-// MightContain reports whether the segment may hold the key. A false answer is
-// exact, and skips the file without touching the disk.
+// MightContain reports whether the segment may hold the key. False is exact, so
+// the file doesn't need to be opened.
 func (s *Segment) MightContain(key []byte) bool {
 	return s.bloom == nil || s.bloom.MightContain(key)
 }
 
-// Get searches the segment for a key, reporting the value, whether it was
-// found, and whether it is a tombstone. I/O and checksum failures are returned
-// rather than flattened into "not found".
+// Get looks for key in the segment. It returns the value, whether the key was
+// found, and whether what it found is a tombstone. I/O and checksum errors are
+// returned, not reported as "not found".
 func (s *Segment) Get(key []byte) (value []byte, found, tombstone bool, err error) {
 	f, err := os.Open(s.path)
 	if err != nil {
@@ -365,8 +364,8 @@ func (s *Segment) Get(key []byte) (value []byte, found, tombstone bool, err erro
 	return value, found, tombstone, nil
 }
 
-// ForEach calls fn for every record. Any decoding failure aborts the walk and
-// is returned -- compaction depends on that.
+// ForEach calls fn for every record. A decode error stops the walk and is
+// returned; compaction relies on that.
 func (s *Segment) ForEach(fn func(Record) error) error {
 	f, err := os.Open(s.path)
 	if err != nil {
@@ -421,9 +420,9 @@ func scanLegacy(r io.Reader, fn func(Record) error) error {
 	}
 }
 
-// syncDir flushes a directory entry so a rename survives a power loss. Best
-// effort: Windows cannot fsync a directory and makes renames durable another
-// way, so failing here would be worse than skipping it.
+// syncDir fsyncs a directory so a rename survives a power cut. Errors are
+// ignored. Windows can't fsync a directory, so this does nothing there, and I
+// haven't tested whether a rename survives power loss on Windows.
 func syncDir(dir string) {
 	f, err := os.Open(dir)
 	if err != nil {

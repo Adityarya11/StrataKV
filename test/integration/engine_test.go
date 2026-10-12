@@ -1,12 +1,9 @@
 // This is AI generated Code, I recently got Claude Code and hence using it to
 // the fullest.
 
-// Package integration exercises StrataKV through its public API only, the way
-// a consumer such as blan-backend does. Nothing here reaches into internals.
-//
-// Unit tests that need unexported identifiers live beside the code they cover
-// (internal/filter, internal/storage); Go requires same-package tests to sit in
-// the same directory. This package holds the end-to-end proofs instead.
+// Package integration tests StrataKV through its public API only, the way an
+// application would use it. Tests that need unexported names sit next to the
+// code they test.
 package integration
 
 import (
@@ -158,10 +155,9 @@ func TestDurabilityAcrossReopen(t *testing.T) {
 }
 
 func TestOpenSurvivesTornWAL(t *testing.T) {
-	// A crash during Put leaves a record ending mid-stream. The database must
-	// still mount, keep every record that precedes the damage, and accept new
-	// writes. Before this fix, Open returned an error and blan-backend's
-	// log.Fatalf turned that into a backend that would not boot.
+	// a crash mid-Put leaves a record cut off at the end of the log. The
+	// database must still open, keep everything before it, and accept new
+	// writes. Open used to return an error here.
 	dir := t.TempDir()
 
 	db := open(t, dir)
@@ -212,8 +208,8 @@ func TestCompactionMergesAndPurges(t *testing.T) {
 
 	fillSegments(t, db, 3)
 
-	// Overwrite the first quarter of the key range so the merge has genuinely
-	// superseded versions to discard, not just distinct keys to copy across.
+	// overwrite the first quarter of the keys so the merge has old versions to
+	// drop
 	payload := strings.Repeat("y", 4096)
 	for i := range 225 {
 		mustPut(t, db, fmt.Sprintf("key%05d", i), payload)
@@ -259,12 +255,9 @@ func TestCompactionMergesAndPurges(t *testing.T) {
 }
 
 func TestCompactionRefusesToDestroyData(t *testing.T) {
-	// The silent data loss regression, end to end.
-	//
-	// Truncating a segment used to be invisible: ReadSegment returned nil on a
-	// short read, so compaction merged the surviving prefix, wrote it out, and
-	// deleted the originals -- losing 128 of 600 keys while returning success.
-	// Compaction must now abort and leave every source file untouched.
+	// A truncated segment used to go unnoticed: compaction merged what was left,
+	// wrote it out and deleted the originals, losing 128 of 600 keys while
+	// returning success. It has to stop and leave every source file alone.
 	dir := t.TempDir()
 
 	db := open(t, dir)
@@ -286,15 +279,14 @@ func TestCompactionRefusesToDestroyData(t *testing.T) {
 		t.Fatalf("truncate segment: %v", err)
 	}
 
-	// A truncated segment has no trailer, so Open refuses to mount rather than
-	// serving a silently shortened view of the data.
+	// a truncated segment has no trailer, so Open refuses it
 	if _, err := engine.Open(dir); err == nil {
 		t.Fatal("Open accepted a database containing a truncated segment")
 	}
 
-	// Restore the real bytes, then corrupt one in place. This is damage Open
-	// cannot see -- header and trailer still verify -- so the protection has to
-	// hold inside Compact, on the record checksum.
+	// restore the real bytes, then flip one in place. Open can't see this
+	// (header and trailer still check out), so Compact has to catch it on the
+	// record checksum
 	damaged := append([]byte(nil), intact...)
 	damaged[64] ^= 0xFF
 	if err := os.WriteFile(victim, damaged, 0o644); err != nil {
@@ -311,9 +303,9 @@ func TestCompactionRefusesToDestroyData(t *testing.T) {
 		t.Fatal("Compact reported success over a corrupt segment")
 	}
 
-	// The critical assertion: every source file is still on disk. Compact
-	// flushes the recovered buffer before merging, so the segment count can
-	// legitimately grow -- what must never happen is a source going missing.
+	// every source file must still be on disk. Compact flushes the memtable
+	// first, so the segment count can grow; what must not happen is a source
+	// going missing
 	for _, name := range names {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Errorf("a failed compaction removed source segment %s: %v", name, err)
@@ -326,11 +318,11 @@ func TestReadsSpanMemtableAndSegments(t *testing.T) {
 	db := open(t, dir)
 	defer db.Close()
 
-	// Written first, so it ends up in an early segment.
+	// written first, so it lands in an early segment
 	mustPut(t, db, "old-key", "original")
 	fillSegments(t, db, 2)
 
-	// Overwritten last, so the newest version is still in the buffer.
+	// overwritten last, so the newest version is still in the memtable
 	mustPut(t, db, "old-key", "updated")
 
 	if got, _ := mustGet(t, db, "old-key"); got != "updated" {
@@ -341,8 +333,8 @@ func TestReadsSpanMemtableAndSegments(t *testing.T) {
 		t.Fatalf("Flush: %v", err)
 	}
 
-	// Now both versions are on disk in different segments, and newest-first
-	// ordering is the only thing that resolves them correctly.
+	// both versions are now on disk in different segments, so only
+	// newest-first ordering picks the right one
 	if got, _ := mustGet(t, db, "old-key"); got != "updated" {
 		t.Errorf("after flush Get = %q, want \"updated\"", got)
 	}
@@ -399,7 +391,7 @@ func TestBatchAppliesAllWrites(t *testing.T) {
 		t.Errorf("Len = %d after Commit, want a reset batch", got)
 	}
 
-	// Later writes to the same key win, exactly as separate writes would.
+	// the last write to a key wins, as it would with separate writes
 	if _, found := mustGet(t, db, "key000"); found {
 		t.Error("a delete staged after a put did not win")
 	}
@@ -436,9 +428,9 @@ func TestBatchSurvivesReopen(t *testing.T) {
 }
 
 func TestBatchIsAtomicAcrossACrash(t *testing.T) {
-	// A batch reaches the log as one group, with every record but the last
-	// marked pending. Truncating the tail simulates a crash mid-write: recovery
-	// must apply none of the batch rather than a prefix of it.
+	// a batch is logged as one group with every record but the last marked
+	// pending. Cutting the tail simulates a crash mid-write; recovery should
+	// apply none of the batch, not a prefix of it
 	dir := t.TempDir()
 
 	db := open(t, dir)
@@ -460,7 +452,7 @@ func TestBatchIsAtomicAcrossACrash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat WAL: %v", err)
 	}
-	// Cut the committing record, leaving the batch without its commit marker.
+	// cut into the committing record so the batch has no commit marker
 	if err := os.Truncate(wal, info.Size()-10); err != nil {
 		t.Fatalf("truncate WAL: %v", err)
 	}
@@ -471,12 +463,12 @@ func TestBatchIsAtomicAcrossACrash(t *testing.T) {
 	}
 	defer reopened.Close()
 
-	// The write that preceded the batch is committed and must survive.
+	// the write before the batch was committed and must survive
 	if _, found := mustGet(t, reopened, "before"); !found {
 		t.Error("a committed write before the batch was lost")
 	}
 
-	// Not one record of the uncommitted batch may be applied.
+	// none of the uncommitted batch may be applied
 	for i := range 50 {
 		if _, found := mustGet(t, reopened, fmt.Sprintf("batched%02d", i)); found {
 			t.Fatalf("batched%02d was applied from a batch that never committed", i)
@@ -505,7 +497,7 @@ func TestOptionsAreHonoured(t *testing.T) {
 		t.Errorf("Segments = %d; an 8 KiB buffer should have flushed repeatedly", stats.Segments)
 	}
 
-	// SyncNever still owes durability at Close.
+	// SyncNever still has to be durable after Close
 	if err := db.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -529,8 +521,8 @@ func TestInvalidOptionsRejected(t *testing.T) {
 		"unknown sync mode": {MemTableSize: 1 << 20, FilterFalsePositiveRate: 0.01, Sync: 99},
 	} {
 		t.Run(name, func(t *testing.T) {
-			// Substituting a default the caller did not ask for would be worse
-			// than refusing: they would get durability they did not choose.
+			// a default nobody asked for would be worse than an error: the caller
+			// would get durability they didn't choose
 			if _, err := engine.OpenWith(t.TempDir(), opts); !errors.Is(err, engine.ErrInvalidOptions) {
 				t.Errorf("OpenWith = %v, want ErrInvalidOptions", err)
 			}

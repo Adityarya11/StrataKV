@@ -1,7 +1,6 @@
-// Package engine provides the public API for the StrataKV storage engine: a
-// thread-safe key-value interface over an append-only write-ahead log, an
-// in-memory write buffer, immutable on-disk segments, and per-segment Bloom
-// filters that keep reads off segments which cannot hold the key.
+// Package engine is the public API for StrataKV, an embedded key-value store.
+// Writes go to a write-ahead log and an in-memory buffer, which is flushed to
+// immutable segment files. Each segment has its own Bloom filter.
 package engine
 
 import (
@@ -19,48 +18,41 @@ import (
 
 const walFileName = "0001.wal"
 
-// ErrEmptyKey reports a zero-length key. The record format uses a zero key
-// length to mean "these bytes are not a record", so storing one would make
-// corruption undetectable.
+// ErrEmptyKey is returned for a zero-length key. A zero key length is how the
+// record format recognises bytes that aren't a record, so an empty key can't be
+// stored.
 var ErrEmptyKey = errors.New("stratakv: key must not be empty")
 
-// DB is an open StrataKV database.
-//
-// A DB is safe for concurrent use by multiple goroutines. Reads share a lock;
-// writes, flushes, and compaction take it exclusively.
+// DB is an open database. It is safe for concurrent use. Reads share a lock;
+// writes, flushes and compaction take it exclusively.
 type DB struct {
 	mu      sync.RWMutex
 	mem     *memtable.MemTable
 	wal     *storage.WAL
 	dataDir string
 
-	// segments is ordered newest first: the first one holding a key holds its
-	// current value. Held in memory because reads used to call os.ReadDir and
-	// re-sort on every Get.
+	// newest first, so the first segment that has a key has its latest value
 	segments []*storage.Segment
 
 	opts Options
 
-	// nextSeq is kept strictly increasing rather than read from the clock,
-	// whose resolution on Windows lets two flushes share a tick -- and two
-	// segments with one name means the second overwrites the first.
+	// Always increasing. The clock alone isn't enough: on Windows two flushes
+	// can land in the same tick, and the second segment would overwrite the
+	// first.
 	nextSeq int64
 
 	lastRecovery storage.RecoveryReport
 }
 
-// Open mounts a database at dataDir with DefaultOptions, creating the
+// Open opens the database in dataDir with DefaultOptions, creating the
 // directory if needed.
 func Open(dataDir string) (*DB, error) {
 	return OpenWith(dataDir, DefaultOptions())
 }
 
-// OpenWith mounts a database with an explicit configuration.
-//
-// It replays the write-ahead log to restore writes that had not yet been
-// flushed, and loads every segment's index. It fails if any segment does not
-// pass its integrity checks: a database that cannot vouch for its own files
-// should say so at startup rather than serve part of them.
+// OpenWith is Open with explicit options. It replays the write-ahead log and
+// loads each segment's index. If a segment fails its integrity checks it
+// returns an error, rather than serving part of the data.
 func OpenWith(dataDir string, opts Options) (*DB, error) {
 	if err := opts.validate(); err != nil {
 		return nil, err
@@ -132,15 +124,15 @@ func (db *DB) loadSegments() error {
 	return nil
 }
 
-// sortSegments orders the index newest first. Caller must hold db.mu.
+// sortSegments puts the newest segment first. The caller holds db.mu.
 func (db *DB) sortSegments() {
 	slices.SortFunc(db.segments, func(a, b *storage.Segment) int {
 		return int(b.Sequence() - a.Sequence())
 	})
 }
 
-// nextSegmentName allocates a filename. The sequence tracks wall-clock
-// nanoseconds so names stay meaningful, but never repeats or goes backwards.
+// nextSegmentName builds a filename from the wall clock, nudged so it never
+// repeats or goes backwards.
 func (db *DB) nextSegmentName() string {
 	seq := max(time.Now().UnixNano(), db.nextSeq)
 	db.nextSeq = seq + 1
@@ -148,9 +140,9 @@ func (db *DB) nextSegmentName() string {
 	return storage.SegmentName(seq)
 }
 
-// Put stores a value for a key. The write is logged and fsynced before the
-// buffer is touched, so a Put that returns nil has survived to disk. The value
-// is copied; the caller may reuse its buffer.
+// Put stores value under key. The write goes to the log (and is fsynced under
+// SyncAlways) before it reaches the in-memory buffer. Both slices are copied,
+// so the caller can reuse them.
 func (db *DB) Put(key, value []byte) error {
 	if len(key) == 0 {
 		return ErrEmptyKey
@@ -170,9 +162,8 @@ func (db *DB) Put(key, value []byte) error {
 	return db.maybeFlushLocked()
 }
 
-// Delete records a tombstone. The key is not physically removed until the next
-// compaction: older segments may still hold a value, and only a tombstone
-// shadows them.
+// Delete writes a tombstone for key. The old value stays on disk until the next
+// compaction.
 func (db *DB) Delete(key []byte) error {
 	if len(key) == 0 {
 		return ErrEmptyKey
@@ -189,15 +180,13 @@ func (db *DB) Delete(key []byte) error {
 	}
 	db.mem.Delete(key)
 
-	// Deletes are writes too; checking only on Put let them grow unbounded.
+	// deletes count towards the flush threshold too
 	return db.maybeFlushLocked()
 }
 
-// Get returns the value stored for a key.
-//
-// A nil error with found false means the key is genuinely absent. A non-nil
-// error means the read could not be completed -- I/O failure, or a segment
-// that fails its checksums -- and must not be treated as absence.
+// Get returns the value for key. found is false if the key doesn't exist. A
+// non-nil error means the read itself failed (an I/O error or a bad checksum),
+// which is not the same as a missing key. Don't modify the returned slice.
 func (db *DB) Get(key []byte) (value []byte, found bool, err error) {
 	if len(key) == 0 {
 		return nil, false, ErrEmptyKey
@@ -206,8 +195,8 @@ func (db *DB) Get(key []byte) (value []byte, found bool, err error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
-	// The buffer holds the newest version of anything recently written,
-	// tombstones included, so it answers first and answers finally.
+	// the memtable has the newest version of anything recent, tombstones
+	// included, so whatever it says is final
 	if entry, known := db.mem.Lookup(key); known {
 		if entry.Deleted {
 			return nil, false, nil
@@ -237,13 +226,14 @@ func (db *DB) Get(key []byte) (value []byte, found bool, err error) {
 	return nil, false, nil
 }
 
-// Has reports whether a key is present, without returning its value.
+// Has reports whether key exists.
 func (db *DB) Has(key []byte) (bool, error) {
 	_, found, err := db.Get(key)
 	return found, err
 }
 
-// maybeFlushLocked flushes if the buffer crossed the threshold. Caller holds db.mu.
+// maybeFlushLocked flushes once the memtable reaches its size limit. The
+// caller holds db.mu.
 func (db *DB) maybeFlushLocked() error {
 	if db.mem.ApproximateSize() < db.opts.MemTableSize {
 		return nil
@@ -252,12 +242,10 @@ func (db *DB) maybeFlushLocked() error {
 	return db.flushLocked()
 }
 
-// flushLocked writes the buffer to a new segment and resets the log.
-//
-// Order matters: segment written and fsynced first, log reset second. A crash
-// between them leaves the data in both places, and replaying a log over a
-// segment holding the same records is harmless. The reverse order opens a
-// window where the data lives nowhere.
+// flushLocked writes the memtable out as a new segment, then resets the log.
+// The segment is fsynced before the log is reset, so a crash in between leaves
+// the data in both places, and replaying a log over a segment that already
+// has the same records does no harm.
 func (db *DB) flushLocked() error {
 	data := db.mem.Export()
 	if len(data) == 0 {
@@ -276,7 +264,7 @@ func (db *DB) flushLocked() error {
 		return fmt.Errorf("open freshly written segment %s: %w", name, err)
 	}
 
-	// Register before clearing: until it is indexed, its keys live only in mem.
+	// index the segment before clearing the memtable
 	db.segments = append(db.segments, seg)
 	db.sortSegments()
 
@@ -289,7 +277,7 @@ func (db *DB) flushLocked() error {
 	return nil
 }
 
-// Flush writes the buffer to a segment regardless of the size threshold.
+// Flush writes the memtable to a segment now, whatever its size.
 func (db *DB) Flush() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -297,19 +285,19 @@ func (db *DB) Flush() error {
 	return db.flushLocked()
 }
 
-// Stats describes the database's current on-disk and in-memory shape.
+// Stats describes the current shape of the database.
 type Stats struct {
-	Segments       int // immutable segment files
-	SegmentEntries int // records across them, superseded versions included
+	Segments       int // segment files on disk
+	SegmentEntries int // records in them, overwritten versions included
 	MemTableKeys   int
-	MemTableBytes  int // what flushing the buffer would write
-	LegacySegments int // pre-checksum format; rewritten by the next compaction
+	MemTableBytes  int // roughly what a flush would write
+	LegacySegments int // old format, rewritten by the next compaction
 
 	Recovery storage.RecoveryReport
 }
 
-// Stats snapshots the database's shape. This is the hook for deciding when to
-// compact.
+// Stats returns a snapshot of the database's shape. It is meant for deciding
+// when to compact.
 func (db *DB) Stats() Stats {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -331,9 +319,9 @@ func (db *DB) Stats() Stats {
 	return s
 }
 
-// Close flushes and closes the write-ahead log. Buffered writes are left in
-// the log -- already durable, replayed by the next Open. Call Flush first to
-// consolidate them into a segment.
+// Close syncs and closes the write-ahead log. Whatever is still in the memtable
+// stays in the log and is replayed by the next Open. Call Flush first to move
+// it into a segment.
 func (db *DB) Close() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()

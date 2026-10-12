@@ -20,7 +20,7 @@ const (
 	walHeaderSize = len(walMagic) + 2
 )
 
-// ErrUnknownWALVersion reports a log written by a newer build of StrataKV.
+// ErrUnknownWALVersion is returned for a log written by a newer version.
 var ErrUnknownWALVersion = errors.New("stratakv/storage: unrecognised WAL format version")
 
 // WAL is an append-only log of key-value mutations. Safe for concurrent use.
@@ -31,8 +31,9 @@ type WAL struct {
 	size int64 // bytes currently in the file, header included
 }
 
-// RecoveryReport describes what Recover found. DiscardedBytes above zero means
-// a previous process died mid-write: normal once, alarming if it repeats.
+// RecoveryReport is what Recover found. DiscardedBytes above zero means an
+// earlier run died mid-write: expected now and then, a worry if it keeps
+// happening.
 type RecoveryReport struct {
 	RecordsApplied     int
 	DiscardedBytes     int64
@@ -40,8 +41,8 @@ type RecoveryReport struct {
 	MigratedFromLegacy bool
 }
 
-// OpenWAL opens or creates the log at path. A new file gets a format header, an
-// existing v1 file is validated, and a pre-v1 file is flagged for migration.
+// OpenWAL opens the log at path, creating it with a header if it's new. An old
+// log without a header is accepted and migrated during Recover.
 func OpenWAL(path string) (*WAL, error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
@@ -66,9 +67,8 @@ func OpenWAL(path string) (*WAL, error) {
 		return nil, err
 	}
 
-	// Leave the handle positioned to append. writeHeader uses WriteAt, which
-	// does not move the offset, so without this a caller that writes before
-	// recovering would overwrite the header it just wrote.
+	// park the offset at the end. writeHeader uses WriteAt, which doesn't move
+	// it, so a write before Recover would land on top of the header
 	if err := w.seekToEnd(); err != nil {
 		f.Close()
 		return nil, err
@@ -93,8 +93,8 @@ func (w *WAL) writeHeader() error {
 	return nil
 }
 
-// validateHeader checks magic and version. A missing magic is a pre-v1 log,
-// which is a migration rather than an error.
+// validateHeader checks the magic and version. No magic means a log from before
+// headers existed, which gets migrated, not rejected.
 func (w *WAL) validateHeader() error {
 	hdr := make([]byte, walHeaderSize)
 	if _, err := w.file.ReadAt(hdr, 0); err != nil && !errors.Is(err, io.EOF) {
@@ -126,21 +126,16 @@ func (w *WAL) isLegacy() (bool, error) {
 	return string(magic) != walMagic, nil
 }
 
-// Write appends one mutation and fsyncs before returning. A write that is only
-// in the page cache is a write the OS is free to lose.
+// Write appends one record and fsyncs before returning.
 func (w *WAL) Write(tombstone bool, key, value []byte) error {
 	return w.Append([]Record{{Tombstone: tombstone, Key: key, Value: value}}, true)
 }
 
-// Append writes records as one atomic group: every record but the last is
-// marked pending, so recovery applies all of them or none.
-//
-// The whole group is assembled into one buffer and issued as a single write
-// followed by at most one fsync. That is what makes a batch cheaper than the
-// same writes made individually -- the fsync, not the write, is the cost.
-//
-// sync=false leaves the records in the page cache, which the OS is free to lose
-// on a crash. Durability then arrives at the next Sync, Reset, or Close.
+// Append writes the records as one group. Every record but the last is marked
+// pending, so recovery applies all of them or none. It is a single write and at
+// most one fsync, which is why a batch is cheaper than separate writes. With
+// sync false the data sits in the page cache until the next Sync, Reset or
+// Close.
 func (w *WAL) Append(recs []Record, sync bool) error {
 	if len(recs) == 0 {
 		return nil
@@ -176,7 +171,7 @@ func (w *WAL) Append(recs []Record, sync bool) error {
 	return nil
 }
 
-// Sync flushes buffered records to stable storage.
+// Sync flushes the log to disk.
 func (w *WAL) Sync() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -188,10 +183,10 @@ func (w *WAL) Sync() error {
 	return nil
 }
 
-// Recover replays the log into apply, truncating an unreadable tail rather than
-// failing. A torn tail is what a crash during Write leaves behind; refusing to
-// open because of it makes the database unmountable after exactly the failure
-// the log exists to survive. Earlier records are protected by their checksums.
+// Recover replays the log through apply. If the tail can't be read it truncates
+// it and carries on. A torn tail is what a crash mid-write leaves, and
+// refusing to open because of it would defeat the point of the log. Earlier
+// records are covered by their checksums.
 func (w *WAL) Recover(apply func(tombstone bool, key, value []byte)) (RecoveryReport, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -222,9 +217,8 @@ func (w *WAL) replay(offset int64, apply func(bool, []byte, []byte)) (RecoveryRe
 	reader := io.Reader(w.file)
 	good := offset
 
-	// Records marked pending belong to a batch whose commit has not been read
-	// yet. They are held back so that a log ending mid-batch applies none of
-	// it -- the group is atomic or it never happened.
+	// pending records belong to a batch whose commit hasn't been read yet.
+	// They're held back so a log that ends mid-batch applies none of it.
 	var (
 		pending  []Record
 		uncommit int64
@@ -257,9 +251,8 @@ func (w *WAL) replay(offset int64, apply func(bool, []byte, []byte)) (RecoveryRe
 		pending, uncommit = nil, 0
 	}
 
-	// Records still held here never reached their commit, so the batch was cut
-	// short by a crash. good already stops before them, and the truncation
-	// below discards them -- which is the atomicity guarantee.
+	// anything still held never got its commit, so the batch was cut off.
+	// good stops before it and the truncation below drops it
 	if len(pending) > 0 && report.TruncationCause == nil {
 		report.TruncationCause = fmt.Errorf("%w: batch of %d records has no commit",
 			ErrTorn, len(pending))
@@ -283,9 +276,9 @@ func (w *WAL) seekToEnd() error {
 	return nil
 }
 
-// recoverLegacy replays a pre-v1 log -- [ flags 1B | keyLen 4B | valLen 4B |
-// key | value ], no magic, no checksums -- and rewrites it in the current
-// format so an existing database keeps its unflushed writes across the upgrade.
+// recoverLegacy replays a log from before headers and checksums existed
+// ([ flags 1B | keyLen 4B | valLen 4B | key | value ]) and rewrites it in the
+// current format, so unflushed writes survive the upgrade.
 func (w *WAL) recoverLegacy(apply func(bool, []byte, []byte)) (RecoveryReport, error) {
 	report := RecoveryReport{MigratedFromLegacy: true}
 
@@ -363,8 +356,8 @@ func readLegacyRecord(r io.Reader) (Record, int, error) {
 	return rec, legacyHeaderSize + int(keyLen) + int(valLen), nil
 }
 
-// rewrite replaces the log's contents via a temporary file and a rename, so a
-// crash midway leaves the original intact.
+// rewrite replaces the log through a temp file and a rename, so a crash partway
+// leaves the original alone.
 func (w *WAL) rewrite(records []Record) error {
 	tmp := w.path + ".rewrite"
 
@@ -395,7 +388,7 @@ func (w *WAL) rewrite(records []Record) error {
 		return fmt.Errorf("close WAL rewrite file: %w", err)
 	}
 
-	// Windows refuses to replace a file that is still open, so close first.
+	// Windows won't replace a file that's still open
 	if err := w.file.Close(); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("close WAL before rewrite: %w", err)
@@ -416,8 +409,8 @@ func (w *WAL) rewrite(records []Record) error {
 	return nil
 }
 
-// Reset empties the log once its contents are durable in a segment. Truncating
-// in place keeps the same file rather than opening a window with no log at all.
+// Reset empties the log once its contents are safe in a segment. It truncates
+// in place, so there is never a moment with no log file.
 func (w *WAL) Reset() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -435,7 +428,7 @@ func (w *WAL) Reset() error {
 	return w.seekToEnd()
 }
 
-// Close flushes and closes the log.
+// Close syncs and closes the log.
 func (w *WAL) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()

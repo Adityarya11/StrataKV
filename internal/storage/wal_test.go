@@ -12,8 +12,8 @@ import (
 	"testing"
 )
 
-// collect replays a WAL into a slice, which is easier to assert against than
-// the callback the engine actually uses.
+// collect replays a WAL into a slice, which is easier to assert on than the
+// callback.
 func collect(t *testing.T, w *WAL) ([]Record, RecoveryReport) {
 	t.Helper()
 
@@ -81,13 +81,9 @@ func TestWALRoundTrip(t *testing.T) {
 }
 
 func TestRecoverTornTail(t *testing.T) {
-	// The regression that motivated this work. A crash during Write leaves a
-	// record ending mid-stream. Recovery used to return that as an error, so
-	// Open failed and the database could not be mounted at all -- after
-	// exactly the failure a write-ahead log exists to survive.
-	//
-	// Every byte of the tail is tried, because where a crash lands inside a
-	// record is arbitrary.
+	// A crash mid-Write leaves a record cut off at the end. Recovery used to
+	// return that as an error, so the database wouldn't open. Every cut length
+	// is tried, since a crash can land anywhere inside a record.
 	for cut := 1; cut <= 12; cut++ {
 		t.Run(fmt.Sprintf("truncated by %d bytes", cut), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "torn.wal")
@@ -119,8 +115,7 @@ func TestRecoverTornTail(t *testing.T) {
 
 			got, report := collect(t, reopened)
 
-			// The four records before the damaged one are protected by their
-			// checksums and must all survive.
+			// the four records before the damaged one must survive
 			if len(got) != 4 {
 				t.Fatalf("replayed %d records, want the 4 that precede the torn one", len(got))
 			}
@@ -131,8 +126,7 @@ func TestRecoverTornTail(t *testing.T) {
 				t.Error("report gives no reason for discarding the tail")
 			}
 
-			// The log must be usable for appends immediately afterwards,
-			// otherwise recovery has only moved the failure later.
+			// the log has to accept writes right after recovery
 			if err := reopened.Write(false, []byte("after"), []byte("recovery")); err != nil {
 				t.Fatalf("append after recovery: %v", err)
 			}
@@ -141,9 +135,8 @@ func TestRecoverTornTail(t *testing.T) {
 }
 
 func TestRecoverDetectsBitFlip(t *testing.T) {
-	// Truncation is the common failure; silent corruption is the dangerous
-	// one. A single flipped bit in a value must be caught by the checksum
-	// rather than replayed as though it were the value that was written.
+	// truncation is the common failure, silent corruption the dangerous one:
+	// one flipped bit has to be caught by the checksum, not replayed as data
 	path := filepath.Join(t.TempDir(), "flipped.wal")
 
 	w, err := OpenWAL(path)
@@ -184,9 +177,8 @@ func TestRecoverDetectsBitFlip(t *testing.T) {
 }
 
 func TestRecoverZeroFilledTail(t *testing.T) {
-	// Some filesystems extend a file with a run of zeros after a crash rather
-	// than leaving it short. Those bytes decode as a record with a zero-length
-	// key, which the codec rejects outright.
+	// some filesystems extend a file with zeros after a crash; those bytes
+	// decode as a record with a zero-length key, which is rejected
 	path := filepath.Join(t.TempDir(), "zeros.wal")
 
 	w, err := OpenWAL(path)
@@ -224,9 +216,8 @@ func TestRecoverZeroFilledTail(t *testing.T) {
 }
 
 func TestLegacyWALMigration(t *testing.T) {
-	// A database written by the previous release has a headerless, unchecksummed
-	// log. Its unflushed writes must survive the upgrade, and the file must
-	// come out in the current format so it is protected from then on.
+	// a log from before headers and checksums: its unflushed writes must
+	// survive the upgrade, and the file must come out in the current format
 	path := filepath.Join(t.TempDir(), "legacy.wal")
 
 	var legacy []byte
@@ -274,7 +265,7 @@ func TestLegacyWALMigration(t *testing.T) {
 	}
 	w.Close()
 
-	// Reopening must now take the v1 path and see all four records.
+	// reopening should take the current-format path and see all four records
 	reopened, err := OpenWAL(path)
 	if err != nil {
 		t.Fatalf("reopen migrated WAL: %v", err)
@@ -327,7 +318,7 @@ func TestRejectsFutureVersion(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	// Guessing at an unknown layout is worse than refusing to open it.
+	// guessing at an unknown layout is worse than refusing to open it
 	if _, err := OpenWAL(path); !errors.Is(err, ErrUnknownWALVersion) {
 		t.Fatalf("OpenWAL error = %v, want ErrUnknownWALVersion", err)
 	}

@@ -9,15 +9,14 @@ import (
 	"testing"
 )
 
-// key produces a 64-character hex key, matching the SHA-256 digests StrataKV
-// is used to store in practice.
+// key makes a 64-character hex key, the shape of the SHA-256 digests this is
+// used with.
 func key(i int) []byte { return fmt.Appendf(nil, "%064x", i) }
 
 func TestNoFalseNegatives(t *testing.T) {
-	// The one guarantee a Bloom filter must never break: every key that was
-	// added must report as possibly present. A false negative in the read path
-	// means a segment holding live data gets skipped and the key reads as
-	// missing — silent data loss.
+	// the one thing a Bloom filter must never do: every key that was added has
+	// to come back as possibly present, or a segment holding live data gets
+	// skipped
 	const n = 5000
 
 	b := NewOptimal(n, DefaultFalsePositiveRate)
@@ -33,11 +32,9 @@ func TestNoFalseNegatives(t *testing.T) {
 }
 
 func TestOptimalSizingHoldsTargetRate(t *testing.T) {
-	// The regression this whole change exists for. The previous implementation
-	// hardcoded 10000 bits / 3 hashes for every segment regardless of key
-	// count, which measured at a 31% false-positive rate for 4000 keys and 86%
-	// for 10000 — at which point the filter stops pruning anything and every
-	// read degrades to a full segment scan.
+	// The old filter used 10000 bits and 3 hashes for every segment. It
+	// measured 31% false positives at 4000 keys and 86% at 10000, which is a
+	// filter that prunes nothing.
 	for _, n := range []int{100, 1000, 4000, 10000, 50000} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
 			b := NewOptimal(n, DefaultFalsePositiveRate)
@@ -55,10 +52,9 @@ func TestOptimalSizingHoldsTargetRate(t *testing.T) {
 
 			rate := float64(fp) / trials
 
-			// Allow generous headroom over the 1% target: the closed-form
-			// optimum assumes perfectly independent hashes, and double hashing
-			// only approximates that. The point is that the rate stays bounded
-			// as n grows instead of climbing toward 1.
+			// some headroom over 1%, since double hashing only approximates
+			// independent hashes. What matters is that the rate stays flat as
+			// n grows
 			if rate > 0.03 {
 				t.Errorf("n=%d: false-positive rate %.2f%% exceeds bound (target %.0f%%)",
 					n, rate*100, DefaultFalsePositiveRate*100)
@@ -71,16 +67,15 @@ func TestOptimalSizingHoldsTargetRate(t *testing.T) {
 }
 
 func TestPackedBitsetMemory(t *testing.T) {
-	// The old filter stored one bool (one byte) per bit. Packing into uint64
-	// words is an 8x reduction, which matters because every open segment holds
-	// its filter resident for the lifetime of the database.
+	// the old filter used a bool (one byte) per bit; packing into uint64 words
+	// is 8x smaller, and every open segment keeps its filter in memory
 	const n = 100000
 
 	b := NewOptimal(n, DefaultFalsePositiveRate)
 	packed := len(b.bits) * 8
 	unpacked := int(b.Bits()) // one byte per bit, as before
 
-	// The bit array rounds up to a whole 64-bit word, so allow that slack.
+	// the array rounds up to a whole 64-bit word
 	if packed*8 > unpacked+63 {
 		t.Errorf("packed bitset uses %d bytes, expected ~%d (1/8th of %d)",
 			packed, unpacked/8, unpacked)
@@ -113,9 +108,8 @@ func TestRoundTrip(t *testing.T) {
 			got.Bits(), got.Hashes(), orig.Bits(), orig.Hashes())
 	}
 
-	// A decoded filter must answer identically to the one that was encoded,
-	// otherwise a filter read back from a segment trailer would prune segments
-	// that actually hold the key.
+	// a decoded filter has to answer exactly like the one that was encoded, or
+	// segments that hold a key would get skipped
 	for i := range n {
 		if !got.MightContain(key(i)) {
 			t.Fatalf("decoded filter lost key %d", i)
@@ -146,9 +140,8 @@ func TestUnmarshalRejectsMalformed(t *testing.T) {
 
 	for name, data := range cases {
 		t.Run(name, func(t *testing.T) {
-			// Accepting a malformed filter is worse than rejecting a valid one:
-			// a filter with a short bit array answers "definitely absent" for
-			// keys whose probes fall past its end.
+			// a short bit array would say "not here" for keys that are there,
+			// so malformed input has to be rejected
 			if _, err := Unmarshal(data); err == nil {
 				t.Errorf("Unmarshal accepted malformed input")
 			}

@@ -1,3 +1,8 @@
 *.local.md
 data
 benchmark_data
+.delta/
+*.exe
+*.test
+*.out
+*.prof

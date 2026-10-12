@@ -1,0 +1,5 @@
+.fixtures/
+
+# Raw benchmark output stays local. Only the written-up SUMMARY.md is kept.
+results/*/*
+!results/*/SUMMARY.md

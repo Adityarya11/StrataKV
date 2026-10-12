@@ -6,30 +6,24 @@ import (
 	"github.com/Adityarya11/StrataKV/v2/internal/storage"
 )
 
-// Batch groups writes so they are applied atomically and share one fsync.
+// Batch collects writes and applies them together: all or nothing, with one
+// fsync for the whole group. The fsync is the expensive part of a write, so a
+// batch costs far less than the same writes made one at a time.
 //
-// Two reasons to use one. Cost: an fsync is milliseconds while encoding a
-// record is microseconds, so a hundred writes in a batch cost roughly one
-// write's worth of durability overhead instead of a hundred. Correctness: the
-// group is all-or-nothing, so a crash mid-batch leaves the database as though
-// the batch never happened.
-//
-// A Batch buffers in memory until Commit, so keep them to a size you are happy
-// to hold. A Batch is not safe for concurrent use, though the DB it commits to
-// is.
+// A Batch lives in memory until Commit. It isn't safe for concurrent use,
+// though the DB it commits to is.
 type Batch struct {
 	db      *DB
 	records []storage.Record
 	bytes   int
 }
 
-// NewBatch starts an empty batch against db.
+// NewBatch returns an empty batch for db.
 func (db *DB) NewBatch() *Batch {
 	return &Batch{db: db}
 }
 
-// Put stages a key-value write. Key and value are copied, so the caller may
-// reuse both buffers immediately.
+// Put adds a write to the batch. Key and value are copied.
 func (b *Batch) Put(key, value []byte) error {
 	if len(key) == 0 {
 		return ErrEmptyKey
@@ -44,7 +38,7 @@ func (b *Batch) Put(key, value []byte) error {
 	return nil
 }
 
-// Delete stages a tombstone.
+// Delete adds a tombstone to the batch.
 func (b *Batch) Delete(key []byte) error {
 	if len(key) == 0 {
 		return ErrEmptyKey
@@ -59,27 +53,22 @@ func (b *Batch) Delete(key []byte) error {
 	return nil
 }
 
-// Len reports how many writes are staged.
+// Len is the number of writes in the batch.
 func (b *Batch) Len() int { return len(b.records) }
 
-// Size estimates the staged key and value bytes, excluding record overhead.
+// Size is the total size of the keys and values in the batch.
 func (b *Batch) Size() int { return b.bytes }
 
-// Reset discards everything staged, so the Batch can be reused.
+// Reset empties the batch so it can be reused.
 func (b *Batch) Reset() {
 	b.records = b.records[:0]
 	b.bytes = 0
 }
 
-// Commit applies the batch.
-//
-// Every staged write reaches the log as one atomic group followed by at most
-// one fsync. On success the batch is reset and can be filled again. On failure
-// nothing is applied and the staged writes are left in place, so the caller can
-// retry.
-//
-// Later writes to the same key within one batch win, exactly as they would if
-// the writes were made separately in the same order.
+// Commit writes the whole batch to the log as one group and, under SyncAlways,
+// fsyncs once. On success the batch is emptied for reuse. On failure nothing
+// was applied and the writes are still in the batch, so you can retry. If a key
+// appears more than once, the last write wins.
 func (b *Batch) Commit() error {
 	if len(b.records) == 0 {
 		return nil

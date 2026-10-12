@@ -22,9 +22,8 @@ func Example() {
 		log.Fatal(err)
 	}
 
-	// Three results, and the distinction matters: found reports whether the key
-	// exists, while err reports whether the read could be completed at all. A
-	// checksum failure is not a cache miss.
+	// found says whether the key exists, err says whether the read worked at
+	// all. A checksum failure is not a cache miss.
 	value, found, err := db.Get([]byte("user:101"))
 	if err != nil {
 		log.Fatal(err)
@@ -43,7 +42,7 @@ func Example() {
 	// false
 }
 
-// Batches group writes so they share a single fsync and apply atomically.
+// A batch is one fsync and applies atomically.
 func ExampleDB_NewBatch() {
 	dir, _ := os.MkdirTemp("", "stratakv")
 	defer os.RemoveAll(dir)
@@ -61,8 +60,8 @@ func ExampleDB_NewBatch() {
 		}
 	}
 
-	// One fsync for all thousand writes, instead of a thousand. A crash before
-	// this returns leaves none of them applied.
+	// one fsync covers all thousand writes, and a crash before this returns
+	// applies none of them
 	if err := batch.Commit(); err != nil {
 		log.Fatal(err)
 	}
@@ -74,7 +73,7 @@ func ExampleDB_NewBatch() {
 	// true
 }
 
-// Options configure durability, memory, and filter accuracy.
+// Options control durability, memory use and filter accuracy.
 func ExampleOpenWith() {
 	dir, _ := os.MkdirTemp("", "stratakv")
 	defer os.RemoveAll(dir)
@@ -82,9 +81,8 @@ func ExampleOpenWith() {
 	opts := engine.DefaultOptions()
 	opts.MemTableSize = 4 << 20 // flush every 4 MiB instead of 1
 
-	// Safe here only because this data can be regenerated. Writes since the
-	// last flush are lost if the machine loses power; a clean Close loses
-	// nothing.
+	// fine here only because the data can be regenerated: writes since the
+	// last flush are lost on power loss, though a clean Close loses nothing
 	opts.Sync = engine.SyncNever
 
 	db, err := engine.OpenWith(dir, opts)
@@ -104,9 +102,9 @@ func ExampleOpenWith() {
 	// compiled output
 }
 
-// Compaction merges every segment into one, dropping superseded versions and
-// physically applying deletes. Nothing triggers it for you: drive it from
-// Stats, or on a schedule that suits your workload.
+// Compact merges every segment into one, dropping overwritten versions and
+// applying deletes. Nothing calls it for you, so drive it from Stats or on a
+// schedule.
 func ExampleDB_Compact() {
 	dir, _ := os.MkdirTemp("", "stratakv")
 	defer os.RemoveAll(dir)
@@ -127,8 +125,8 @@ func ExampleDB_Compact() {
 		}
 	}
 
-	// Overwriting leaves the older versions stranded in earlier segments.
-	// Reclaiming them is what compaction is for.
+	// overwriting leaves the old versions behind in earlier segments, which
+	// compaction removes
 	for i := range 200 {
 		if err := db.Put(fmt.Appendf(nil, "key:%03d", i), value); err != nil {
 			log.Fatal(err)
